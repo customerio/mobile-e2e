@@ -128,7 +128,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Dismiss any modal Campaign 141 raised, then return to dashboard ---
+# --- Dismiss any modal Campaign 141 raised ---
 - runFlow:
     when:
       visible: "Continue"
@@ -136,24 +136,11 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
-# Both samples expose a "Back Button" in the top app bar (Android uses
-# contentDescription, iOS uses accessibilityIdentifier). Tap it to pop back
-# to the dashboard — this is more reliable than Android's hardware back
-# (which the IME can consume) and iOS has no hardware back at all.
-- runFlow:
-    when:
-      notVisible:
-        id: "custom_event_button"
-    commands:
-      - tapOn: "Back Button"
-- extendedWaitUntil:
-    visible:
-      id: "custom_event_button"
-    timeout: 10000
 
 # --- Inline in-app visual proof (best-effort) ---
-# Screen label differs per sample — regex matches "Inline Examples (Tabs)",
-# "Inline Examples (SwiftUI)", and "Inline Examples (UIKit)".
+# The inline action renders into a slot on the Inline Examples screen.
+# Only navigate if it's reachable from the current screen (regex handles
+# per-platform labels: "Inline Examples (Tabs)" / "(SwiftUI)" / "(UIKit)").
 - runFlow:
     when:
       visible: ".*Inline Examples.*"
@@ -166,12 +153,6 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_08_inline_b
       - scroll
       - takeScreenshot: artifacts/c141_09_inline_c
-      - runFlow:
-          when:
-            notVisible:
-              id: "custom_event_button"
-          commands:
-            - tapOn: "Back Button"
 
 # --- Visual proof: notification shade / Notification Center ---
 # The push going live IS the shade showing the notification — if the
