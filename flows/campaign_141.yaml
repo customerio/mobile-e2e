@@ -136,19 +136,27 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Return to dashboard. If the event screen auto-popped after Send, we're
-# already on the dashboard; otherwise navigate back. Use extendedWaitUntil
-# to absorb the either-or without a brittle branch. ---
+# --- Return to dashboard. If the event screen auto-popped after Send we're
+# already on the dashboard; otherwise navigate back. The SDK may ALSO be
+# rendering a modal from Campaign 141's in-app action at this point, so
+# dismiss any Continue that appears before waiting for the dashboard. ---
 - runFlow:
     when:
       notVisible:
         id: "Custom Event Button|send_custom_event_button"
     commands:
       - back
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+      - waitForAnimationToEnd:
+          timeout: 2000
 - extendedWaitUntil:
     visible:
       id: "Custom Event Button|send_custom_event_button"
-    timeout: 8000
+    timeout: 10000
 
 # --- Inline in-app visual proof (best-effort) ---
 # Campaign 141 also dispatches an inline action. Navigate to an Inline
