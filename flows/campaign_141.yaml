@@ -165,19 +165,19 @@ name: E2E — Campaign 141 full loop with real push delivery
                 end: 80%, 50%
 
 # --- Backend assertion #2: push dispatched for this customer ---
-# Assert `drafted` as the cross-platform floor — proves the campaign's push
-# action fired server-side. Delivery + click are proven visually by the
-# notification-shade section below (Android with FCM on Play-Services
-# emulators); on iOS they require separate APNs cert setup in the workspace.
+# `sent` is the cross-platform floor: it's populated the moment the campaign
+# fires the push action server-side. Actual delivery + click are proven
+# visually by the notification-shade section below (Android with FCM on
+# Play-Services emulators); on iOS those require APNs cert setup.
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
       MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "push"
-      MIN_METRIC: "drafted"
+      MIN_METRIC: "sent"
       CAMPAIGN_ID: "141"
-      MAX_WAIT_MS: "30000"
+      MAX_WAIT_MS: "45000"
 
 # --- Visual proof: pull down the notification shade / Notification Center ---
 - waitForAnimationToEnd:
