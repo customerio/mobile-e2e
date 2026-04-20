@@ -118,7 +118,8 @@ name: E2E — Campaign 141 full loop with real push delivery
     element:
       id: "Send Event Button|send_event_button"
     direction: DOWN
-    timeout: 5000
+    timeout: 15000
+    scrollDuration: 300
 - tapOn:
     id: "Send Event Button|send_event_button"
 
