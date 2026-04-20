@@ -1,3 +1,4 @@
+appId: ${APP_ID}
 tags:
   - campaign-141
 name: E2E — Campaign 141 full loop with real push delivery
