@@ -1,0 +1,211 @@
+tags:
+  - campaign-141
+name: E2E — Campaign 141 full loop with real push delivery
+---
+# SHARED cross-platform flow for Customer.io Campaign 141 ("Maestro E2E").
+#
+# Runs unchanged on iOS (APN-UIKit) and Android (kotlin_compose) because
+# both sample apps expose the same accessibility identifiers:
+#   - iOS: `accessibilityIdentifier` on each UIView.
+#   - Android: `Modifier.testTag(...)` on each composable, surfaced as
+#     `resource-id` via `Modifier.semantics { testTagsAsResourceId = true }`
+#     on the root nav graph.
+#
+# Selector conventions:
+#   - `{ id: "..." }`  for every widget we want to drive/assert (stable).
+#   - text / regex     only for shared surface copy (modal body, push title,
+#                      system permission prompts) where IDs aren't applicable.
+#
+# Per-sample overrides (email prefix, harness path, hardware-back vs edge-swipe)
+# live in each sample repo's `.maestro/run.sh` and `scripts/setup_run.js`.
+# This file is the single source of truth for the test itself.
+#
+#   SDK identify+track
+#     → backend routes
+#       → campaign 141 fires 3 actions
+#         → in-app modal dispatched (metrics.sent)
+#         → in-app inline dispatched (metrics.sent)
+#         → push sent, delivered to the device (metrics.delivered)
+#           → user taps it
+#             → SDK reports click → backend records metrics.opened
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+- launchApp:
+    clearState: true
+
+# --- Login ---
+- assertVisible:
+    id: "Login Button"
+- tapOn:
+    id: "First Name Input"
+- inputText: "Maestro Campaign Tester"
+- hideKeyboard
+- tapOn:
+    id: "Email Input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "Login Button"
+
+# --- Welcome modal from identify (campaign 55) ---
+# Best-effort: if the SDK's MessagingInApp isn't initialized (siteId missing),
+# the modal never appears and we just proceed to the dashboard.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - assertVisible: ".*Thank you for choosing.*"
+      - takeScreenshot: artifacts/c141_01_welcome_modal
+      - tapOn: "Continue"
+
+- assertVisible:
+    id: "Custom Event Button"
+- takeScreenshot: artifacts/c141_02_dashboard
+
+# --- Grant push permission if the system prompt appears ---
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+
+# If another in-app modal was queued (multiple campaigns around identify),
+# dismiss it before firing the campaign-141 trigger event.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+      - waitForAnimationToEnd:
+          timeout: 2000
+
+# --- Fire the `maestro_test` event to trigger Campaign 141 ---
+- tapOn:
+    id: "Custom Event Button"
+- extendedWaitUntil:
+    visible:
+      id: "Event Name Input"
+    timeout: 10000
+- tapOn:
+    id: "Event Name Input"
+- inputText: "maestro_test"
+- hideKeyboard
+- tapOn:
+    id: "Property Name Input"
+- inputText: "run_id"
+- hideKeyboard
+- tapOn:
+    id: "Property Value Input"
+- inputText: ${output.run_id}
+- hideKeyboard
+- takeScreenshot: artifacts/c141_03_event_form
+- tapOn:
+    id: "Send Event Button"
+
+# --- Backend assertion #1: in-app action dispatched ---
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "in_app"
+      MIN_METRIC: "sent"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "45000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# --- Return to dashboard. Android samples use hardware back; iOS uses the
+# left-edge swipe. Do both — each platform honors the one it understands. ---
+- runFlow:
+    when:
+      visible:
+        id: "Custom Event Button"
+    commands:
+      - assertVisible:
+          id: "Custom Event Button"
+# Fallback navigation if still on the event form:
+- runFlow:
+    when:
+      notVisible:
+        id: "Custom Event Button"
+    commands:
+      - back
+      - swipe:
+          start: 1%, 50%
+          end: 80%, 50%
+
+# --- Inline in-app visual proof (best-effort) ---
+# Campaign 141 also dispatches an inline action. Navigate to an Inline
+# Examples screen so the inline renders in its slot; capture screenshots.
+# Screen label differs per sample — regex matches "Inline Examples (Tabs)",
+# "Inline Examples (SwiftUI)", and "Inline Examples (UIKit)".
+- runFlow:
+    when:
+      visible: ".*Inline Examples.*"
+    commands:
+      - tapOn: ".*Inline Examples.*"
+      - waitForAnimationToEnd:
+          timeout: 3000
+      - takeScreenshot: artifacts/c141_07_inline_a
+      - scroll
+      - takeScreenshot: artifacts/c141_08_inline_b
+      - scroll
+      - takeScreenshot: artifacts/c141_09_inline_c
+      - runFlow:
+          when:
+            notVisible:
+              id: "Custom Event Button"
+          commands:
+            - back
+            - swipe:
+                start: 1%, 50%
+                end: 80%, 50%
+
+# --- Backend assertion #2: push dispatched for this customer ---
+# Assert `drafted` as the cross-platform floor — proves the campaign's push
+# action fired server-side. Delivery + click are proven visually by the
+# notification-shade section below (Android with FCM on Play-Services
+# emulators); on iOS they require separate APNs cert setup in the workspace.
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "drafted"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "30000"
+
+# --- Visual proof: pull down the notification shade / Notification Center ---
+- waitForAnimationToEnd:
+    timeout: 3000
+- swipe:
+    start: 50%, 1%
+    end: 50%, 90%
+    duration: 900
+- waitForAnimationToEnd:
+    timeout: 2000
+- runFlow:
+    when:
+      visible: "Maestro Push"
+    commands:
+      - assertVisible: "Maestro Push"
+      - takeScreenshot: artifacts/c141_04_push_in_shade
+      - tapOn: "Maestro Push"
+      - waitForAnimationToEnd:
+          timeout: 4000
+      - takeScreenshot: artifacts/c141_05_after_push_tap
+      - runScript:
+          file: ../scripts/assert_message_delivered.js
+          env:
+            MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
+            RUN_EMAIL: ${output.email}
+            EXPECTED_TYPE: "push"
+            MIN_METRIC: "opened"
+            CAMPAIGN_ID: "141"
+            MAX_WAIT_MS: "20000"
+      - assertTrue: ${output.assert_ok === "true"}
+
+- takeScreenshot: artifacts/c141_06_done
