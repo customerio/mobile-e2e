@@ -112,6 +112,13 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
+# The event form is scrollable on Android (Java sample); scroll to reveal the
+# Send Event button if it's below the fold before tapping.
+- scrollUntilVisible:
+    element:
+      id: "Send Event Button|send_event_button"
+    direction: DOWN
+    timeout: 5000
 - tapOn:
     id: "Send Event Button|send_event_button"
 
