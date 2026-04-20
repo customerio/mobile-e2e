@@ -5,21 +5,17 @@ name: E2E — Campaign 141 full loop with real push delivery
 ---
 # SHARED cross-platform flow for Customer.io Campaign 141 ("Maestro E2E").
 #
-# Runs unchanged on iOS (APN-UIKit) and Android (kotlin_compose) because
-# both sample apps expose the same accessibility identifiers:
-#   - iOS: `accessibilityIdentifier` on each UIView.
-#   - Android: `Modifier.testTag(...)` on each composable, surfaced as
-#     `resource-id` via `Modifier.semantics { testTagsAsResourceId = true }`
-#     on the root nav graph.
-#
-# Selector conventions:
-#   - `{ id: "..." }`  for every widget we want to drive/assert (stable).
-#   - text / regex     only for shared surface copy (modal body, push title,
-#                      system permission prompts) where IDs aren't applicable.
-#
-# Per-sample overrides (email prefix, harness path, hardware-back vs edge-swipe)
-# live in each sample repo's `.maestro/run.sh` and `scripts/setup_run.js`.
-# This file is the single source of truth for the test itself.
+# Runs unchanged on iOS (APN-UIKit) and Android (java_layout) because both
+# sample apps use the same id naming on every widget the flow touches.
+# Per Maestro docs:
+#   - iOS:     `id:` maps to `accessibilityIdentifier`
+#   - Android: `id:` maps to `android:id` (resource-id). For Compose,
+#              `Modifier.semantics { testTagsAsResourceId = true }` surfaces
+#              `testTag(...)` values as resource-id.
+# The selector contract below is therefore `snake_case`, applied on both
+# platforms. Platform-specific bits (hardware back vs edge swipe,
+# notification center vs notification shade) are handled via
+# `when: platform:` conditions — per Maestro's official pattern.
 #
 #   SDK identify+track
 #     → backend routes
@@ -38,21 +34,22 @@ name: E2E — Campaign 141 full loop with real push delivery
 
 # --- Login ---
 - assertVisible:
-    id: "Login Button|login_button"
+    id: "login_button"
 - tapOn:
-    id: "First Name Input|display_name_text_input"
+    id: "first_name_input"
 - inputText: "Maestro Campaign Tester"
 - hideKeyboard
 - tapOn:
-    id: "Email Input|email_text_input"
+    id: "email_input"
 - inputText: ${output.email}
 - hideKeyboard
 - tapOn:
-    id: "Login Button|login_button"
+    id: "login_button"
 
 # --- Welcome modal from identify (campaign 55) ---
-# Best-effort: if the SDK's MessagingInApp isn't initialized (siteId missing),
-# the modal never appears and we just proceed to the dashboard.
+# Best-effort: if MessagingInApp isn't initialized (siteId missing) the modal
+# never appears; we just proceed to the dashboard. Backend dispatches the
+# in_app either way — we assert that via the Ext API further down.
 - runFlow:
     when:
       visible: "Continue"
@@ -62,7 +59,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
 
 - assertVisible:
-    id: "Custom Event Button|send_custom_event_button"
+    id: "custom_event_button"
 - takeScreenshot: artifacts/c141_02_dashboard
 
 # --- Grant push permission if the system prompt appears ---
@@ -84,27 +81,25 @@ name: E2E — Campaign 141 full loop with real push delivery
 
 # --- Fire the `maestro_test` event to trigger Campaign 141 ---
 - tapOn:
-    id: "Custom Event Button|send_custom_event_button"
+    id: "custom_event_button"
 - extendedWaitUntil:
     visible:
-      id: "Event Name Input|event_name_text_input"
+      id: "event_name_input"
     timeout: 10000
 - tapOn:
-    id: "Event Name Input|event_name_text_input"
+    id: "event_name_input"
 - inputText: "maestro_test"
 - hideKeyboard
 - tapOn:
-    id: "Property Name Input|property_name_text_input"
+    id: "property_name_input"
 - inputText: "run_id"
 - hideKeyboard
 - tapOn:
-    id: "Property Value Input|property_value_text_input"
+    id: "property_value_input"
 - inputText: ${output.run_id}
 - hideKeyboard
 - takeScreenshot: artifacts/c141_03_event_form
-# The SDK may flush a queued in-app modal between the form fill and the send
-# tap (campaigns that dispatch multiple in-apps around identify). Dismiss it
-# so the Send Event tap lands on the actual button and not on a modal backdrop.
+# The SDK may flush a queued in-app modal between form fill and the Send tap.
 - runFlow:
     when:
       visible: "Continue"
@@ -112,17 +107,14 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
-# The event form is scrollable on Android (Java sample); scroll to reveal the
-# Send Event button if it's below the fold before tapping. Use visible text
-# "Send Event" because Android's ConstraintLayout with bottom-anchored button
-# in a NestedScrollView can prevent the id from appearing in Maestro's
-# bounds-filtered hierarchy until scrolled into view.
+# Android NestedScrollView can keep the Send button below the fold.
 - scrollUntilVisible:
     element:
-      text: "^Send Event$"
+      id: "send_event_button"
     direction: DOWN
-    timeout: 15000
-- tapOn: "^Send Event$"
+    timeout: 10000
+- tapOn:
+    id: "send_event_button"
 
 # --- Backend assertion #1: in-app action dispatched ---
 - runScript:
@@ -136,11 +128,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Return to dashboard. If the event screen auto-popped after Send we're
-# already on the dashboard; otherwise navigate back. The SDK may ALSO be
-# rendering a modal from Campaign 141's in-app action at this point, so
-# dismiss any Continue that appears before waiting for the dashboard. ---
-# Dismiss any modal Campaign 141's in-app action raised right after the event.
+# --- Dismiss any modal Campaign 141 raised, then return to dashboard ---
 - runFlow:
     when:
       visible: "Continue"
@@ -148,36 +136,30 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
-# Return to dashboard. Prefer the app's own top-bar Back Button (ImageButton
-# with contentDescription "Back Button") — Android's hardware `back` key is
-# unreliable on fragment screens while the IME may still consume it. Fall
-# back to `back` if no app back button is present (e.g. iOS uses swipe).
+# Maestro's `back` command is Android + Web only per docs; iOS needs a swipe
+# or an app back button. Use `platform:` conditions — the canonical pattern.
 - runFlow:
     when:
+      platform: Android
       notVisible:
-        id: "Custom Event Button|send_custom_event_button"
+        id: "custom_event_button"
     commands:
-      - runFlow:
-          when:
-            visible: "Back Button"
-          commands:
-            - tapOn: "Back Button"
-      - runFlow:
-          when:
-            notVisible:
-              id: "Custom Event Button|send_custom_event_button"
-          commands:
-            - back
-      - waitForAnimationToEnd:
-          timeout: 2000
+      - back
+- runFlow:
+    when:
+      platform: iOS
+      notVisible:
+        id: "custom_event_button"
+    commands:
+      - swipe:
+          start: 1%, 50%
+          end: 80%, 50%
 - extendedWaitUntil:
     visible:
-      id: "Custom Event Button|send_custom_event_button"
+      id: "custom_event_button"
     timeout: 10000
 
 # --- Inline in-app visual proof (best-effort) ---
-# Campaign 141 also dispatches an inline action. Navigate to an Inline
-# Examples screen so the inline renders in its slot; capture screenshots.
 # Screen label differs per sample — regex matches "Inline Examples (Tabs)",
 # "Inline Examples (SwiftUI)", and "Inline Examples (UIKit)".
 - runFlow:
@@ -194,20 +176,25 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_09_inline_c
       - runFlow:
           when:
+            platform: Android
             notVisible:
-              id: "Custom Event Button|send_custom_event_button"
+              id: "custom_event_button"
           commands:
             - back
+      - runFlow:
+          when:
+            platform: iOS
+            notVisible:
+              id: "custom_event_button"
+          commands:
             - swipe:
                 start: 1%, 50%
                 end: 80%, 50%
 
-# --- Visual proof: pull down the notification shade / Notification Center ---
-# The push going live IS the shade showing the notification, so we don't need
-# a separate backend assertion for push dispatch — the visual proof below
-# is the assertion. If the notification doesn't appear, the shade section's
-# `runFlow: when: visible: Maestro Push` short-circuits and we skip the
-# click + `opened` checks (iOS case when APNs isn't wired).
+# --- Visual proof: notification shade / Notification Center ---
+# The push going live IS the shade showing the notification — if the
+# notification doesn't appear the shade's `runFlow: when: visible: Maestro Push`
+# short-circuits and we skip the click check (iOS case when APNs isn't wired).
 - waitForAnimationToEnd:
     timeout: 3000
 - swipe:
@@ -226,12 +213,10 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Maestro Push"
       - waitForAnimationToEnd:
           timeout: 4000
-      # Returning to a known in-app screen is the proof that the push tap
-      # deep-linked / opened the app, without relying on backend metrics
-      # (which can lag a few seconds behind the actual click).
+      # App-returned-to-known-screen is the proof the push tap opened the app.
       - extendedWaitUntil:
           visible:
-            id: "Custom Event Button|send_custom_event_button"
+            id: "custom_event_button"
           timeout: 10000
       - takeScreenshot: artifacts/c141_05_after_push_tap
 
