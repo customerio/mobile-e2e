@@ -107,10 +107,13 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
-# Android NestedScrollView can keep the Send button below the fold.
+# Android NestedScrollView can keep the Send button below the fold and
+# Maestro's bounds filter can hide it from the id selector until it's on
+# screen. Pivot to visible text to find it; visible text "Send Event" is
+# identical on both samples.
 - scrollUntilVisible:
     element:
-      id: "send_event_button"
+      text: "^Send Event$"
     direction: DOWN
     timeout: 10000
 - tapOn:
