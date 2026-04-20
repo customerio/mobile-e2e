@@ -102,6 +102,16 @@ name: E2E — Campaign 141 full loop with real push delivery
 - inputText: ${output.run_id}
 - hideKeyboard
 - takeScreenshot: artifacts/c141_03_event_form
+# The SDK may flush a queued in-app modal between the form fill and the send
+# tap (campaigns that dispatch multiple in-apps around identify). Dismiss it
+# so the Send Event tap lands on the actual button and not on a modal backdrop.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+      - waitForAnimationToEnd:
+          timeout: 2000
 - tapOn:
     id: "Send Event Button"
 
