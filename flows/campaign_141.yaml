@@ -113,15 +113,16 @@ name: E2E — Campaign 141 full loop with real push delivery
       - waitForAnimationToEnd:
           timeout: 2000
 # The event form is scrollable on Android (Java sample); scroll to reveal the
-# Send Event button if it's below the fold before tapping.
+# Send Event button if it's below the fold before tapping. Use visible text
+# "Send Event" because Android's ConstraintLayout with bottom-anchored button
+# in a NestedScrollView can prevent the id from appearing in Maestro's
+# bounds-filtered hierarchy until scrolled into view.
 - scrollUntilVisible:
     element:
-      id: "Send Event Button|send_event_button"
+      text: "^Send Event$"
     direction: DOWN
     timeout: 15000
-    speed: 40
-- tapOn:
-    id: "Send Event Button|send_event_button"
+- tapOn: "^Send Event$"
 
 # --- Backend assertion #1: in-app action dispatched ---
 - runScript:
