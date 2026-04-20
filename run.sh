@@ -6,6 +6,9 @@
 #
 # Expected env (set by the caller):
 #   APP_ID               Bundle id / package name to launch
+#   PLATFORM             "iOS" or "Android" (the sample knows which it is —
+#                        we don't detect from booted devices since both may
+#                        be running at once)
 #   HARNESS_DIR          Absolute path to this harness checkout
 #   SAMPLE_MAESTRO_DIR   Absolute path to the sample's .maestro/ dir (holds .env)
 #
@@ -31,19 +34,20 @@ if [[ -z "${MAESTRO_EXT_API_KEY:-}" ]]; then
   echo "warn: MAESTRO_EXT_API_KEY not set; backend assertions will fail auth" >&2
 fi
 : "${APP_ID:?APP_ID must be exported by the sample repo run.sh}"
+: "${PLATFORM:?PLATFORM must be exported by the sample repo run.sh (iOS or Android)}"
 
-# --- Platform detection: prefer a booted iOS sim, else a connected Android device.
-PLATFORM=""; BOOTED=""
-if command -v xcrun >/dev/null 2>&1; then
+BOOTED=""
+if [[ "$PLATFORM" == iOS ]]; then
   BOOTED=$(xcrun simctl list devices booted 2>/dev/null | grep -Eo '\(([0-9A-F-]{36})\) \(Booted\)' | head -1 | grep -Eo '[0-9A-F-]{36}' || true)
-  [[ -n "$BOOTED" ]] && PLATFORM=iOS
-fi
-if [[ -z "$PLATFORM" ]] && command -v adb >/dev/null 2>&1 && adb devices | grep -q "device$"; then
-  PLATFORM=Android
-fi
-if [[ -z "$PLATFORM" ]]; then
-  echo "error: no booted iOS simulator and no adb-attached Android device" >&2
-  exit 2
+  if [[ -z "$BOOTED" ]]; then
+    echo "error: no booted iOS simulator" >&2; exit 2
+  fi
+elif [[ "$PLATFORM" == Android ]]; then
+  if ! adb devices 2>/dev/null | grep -q "device$"; then
+    echo "error: no adb-attached Android device" >&2; exit 2
+  fi
+else
+  echo "error: unknown PLATFORM '$PLATFORM' (expected iOS or Android)" >&2; exit 2
 fi
 echo ">> platform: $PLATFORM${BOOTED:+ (sim $BOOTED)}"
 
@@ -91,20 +95,19 @@ trap cleanup EXIT
 
 # --- Run maestro.
 echo ">> running maestro: $FLOW_PATH"
-set +e
+MAESTRO_DEVICE=""
 if [[ "$PLATFORM" == iOS ]]; then
-  maestro --device "$BOOTED" test \
-    --format=HTML --output="$OUT_DIR/report.html" \
-    --debug-output="$DEBUG_DIR" --flatten-debug-output \
-    -e "APP_ID=$APP_ID" \
-    "$FLOW_PATH" | tee "$OUT_DIR/run.log"
+  MAESTRO_DEVICE="--device $BOOTED"
 else
-  maestro test \
-    --format=HTML --output="$OUT_DIR/report.html" \
-    --debug-output="$DEBUG_DIR" --flatten-debug-output \
-    -e "APP_ID=$APP_ID" \
-    "$FLOW_PATH" | tee "$OUT_DIR/run.log"
+  ANDROID_DEVICE=$(adb devices | awk '/device$/ {print $1; exit}')
+  [[ -n "$ANDROID_DEVICE" ]] && MAESTRO_DEVICE="--device $ANDROID_DEVICE"
 fi
+set +e
+maestro $MAESTRO_DEVICE test \
+  --format=HTML --output="$OUT_DIR/report.html" \
+  --debug-output="$DEBUG_DIR" --flatten-debug-output \
+  -e "APP_ID=$APP_ID" \
+  "$FLOW_PATH" | tee "$OUT_DIR/run.log"
 EXIT=$?
 set -e
 
