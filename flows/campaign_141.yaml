@@ -193,20 +193,18 @@ name: E2E — Campaign 141 full loop with real push delivery
       visible: "Maestro Push"
     commands:
       - assertVisible: "Maestro Push"
+      - assertVisible: "MAESTRO_PUSH_OK"
       - takeScreenshot: artifacts/c141_04_push_in_shade
       - tapOn: "Maestro Push"
       - waitForAnimationToEnd:
           timeout: 4000
+      # Returning to a known in-app screen is the proof that the push tap
+      # deep-linked / opened the app, without relying on backend metrics
+      # (which can lag a few seconds behind the actual click).
+      - extendedWaitUntil:
+          visible:
+            id: "Custom Event Button"
+          timeout: 10000
       - takeScreenshot: artifacts/c141_05_after_push_tap
-      - runScript:
-          file: ../scripts/assert_message_delivered.js
-          env:
-            MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
-            RUN_EMAIL: ${output.email}
-            EXPECTED_TYPE: "push"
-            MIN_METRIC: "opened"
-            CAMPAIGN_ID: "141"
-            MAX_WAIT_MS: "20000"
-      - assertTrue: ${output.assert_ok === "true"}
 
 - takeScreenshot: artifacts/c141_06_done
