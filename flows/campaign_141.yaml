@@ -136,24 +136,16 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
-# Maestro's `back` command is Android + Web only per docs; iOS needs a swipe
-# or an app back button. Use `platform:` conditions — the canonical pattern.
+# Both samples expose a "Back Button" in the top app bar (Android uses
+# contentDescription, iOS uses accessibilityIdentifier). Tap it to pop back
+# to the dashboard — this is more reliable than Android's hardware back
+# (which the IME can consume) and iOS has no hardware back at all.
 - runFlow:
     when:
-      platform: Android
       notVisible:
         id: "custom_event_button"
     commands:
-      - back
-- runFlow:
-    when:
-      platform: iOS
-      notVisible:
-        id: "custom_event_button"
-    commands:
-      - swipe:
-          start: 1%, 50%
-          end: 80%, 50%
+      - tapOn: "Back Button"
 - extendedWaitUntil:
     visible:
       id: "custom_event_button"
@@ -176,20 +168,10 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_09_inline_c
       - runFlow:
           when:
-            platform: Android
             notVisible:
               id: "custom_event_button"
           commands:
-            - back
-      - runFlow:
-          when:
-            platform: iOS
-            notVisible:
-              id: "custom_event_button"
-          commands:
-            - swipe:
-                start: 1%, 50%
-                end: 80%, 50%
+            - tapOn: "Back Button"
 
 # --- Visual proof: notification shade / Notification Center ---
 # The push going live IS the shade showing the notification — if the
