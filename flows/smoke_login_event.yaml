@@ -1,0 +1,84 @@
+appId: ${APP_ID}
+tags:
+  - smoke
+name: Smoke — login → in-app delivered → custom event
+---
+# Fast smoke check of the identify path. Validates:
+#   1. The sample app logs in with a fresh email.
+#   2. The backend receives the identify and campaign 55 ("New CIO Tester")
+#      dispatches an in_app (sent metric populated).
+#   3. The welcome in-app modal renders on the device and can be dismissed.
+#   4. A custom event fires with a unique run_id property for traceability.
+#
+# Runs unchanged on iOS (APN-UIKit) and Android (java_layout) thanks to
+# the unified snake_case selector vocabulary.
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+- launchApp:
+    clearState: true
+
+# --- Login ---
+- assertVisible:
+    id: "login_button"
+- tapOn:
+    id: "first_name_input"
+- inputText: "Maestro Tester"
+- hideKeyboard
+- tapOn:
+    id: "email_input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "login_button"
+
+- assertVisible:
+    id: "custom_event_button"
+
+# --- Backend assertion: identify → campaign 55 → in_app dispatched ---
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "in_app"
+      MIN_METRIC: "sent"
+      MAX_WAIT_MS: "60000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# --- Visual proof: welcome modal rendered + dismissed ---
+- extendedWaitUntil:
+    visible: "Continue"
+    timeout: 20000
+- assertVisible: ".*Thank you for choosing.*"
+- takeScreenshot: artifacts/smoke_01_modal
+- tapOn: "Continue"
+- assertNotVisible: ".*Thank you for choosing.*"
+
+# --- Custom event with run_id for traceability ---
+- tapOn:
+    id: "custom_event_button"
+- extendedWaitUntil:
+    visible:
+      id: "event_name_input"
+    timeout: 10000
+- tapOn:
+    id: "event_name_input"
+- inputText: "maestro_test_event"
+- hideKeyboard
+- tapOn:
+    id: "property_name_input"
+- inputText: "run_id"
+- hideKeyboard
+- tapOn:
+    id: "property_value_input"
+- inputText: ${output.run_id}
+- hideKeyboard
+- scrollUntilVisible:
+    element:
+      text: "^Send Event$"
+    direction: DOWN
+    timeout: 10000
+- tapOn:
+    id: "send_event_button"

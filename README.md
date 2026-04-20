@@ -18,12 +18,13 @@ the sample repos themselves.
 
 ```
 flows/
-  campaign_141.yaml            # Shared cross-platform Maestro flow for Campaign 141
-                               # ("Maestro E2E"). Drives both iOS (APN-UIKit) and
-                               # Android (kotlin_compose) unchanged — same selectors
-                               # resolve on both platforms via unified accessibility
-                               # IDs (iOS `accessibilityIdentifier`, Android
-                               # `Modifier.testTag(...)` + `testTagsAsResourceId`).
+  campaign_141.yaml            # Full E2E loop: SDK identify → backend → campaign
+                               # 141 → in-app + inline + push, with visual proof
+                               # of the push notification.
+  smoke_login_event.yaml       # Smoke: identify → backend in_app sent → modal
+                               # rendered + dismissed → custom event fired.
+  inline_messages.yaml         # Template for inline in-app validation (needs a
+                               # seeded workspace campaign to fully assert).
 scripts/
   setup_run.js                 # Generates a unique run_id + email and POSTs to the
                                # sink so the HTML report shows per-run identity.
@@ -37,7 +38,17 @@ scripts/
   render_video.py              # Reads same inputs + device.mp4 → annotated.mp4:
                                # device screen on the left, live step panel on the
                                # right, backend-response card pops when assertions land.
+  capture_frames.sh            # iOS-only fallback: `simctl recordVideo` collides with
+                               # Maestro's active session, so run.sh on iOS polls
+                               # `simctl io screenshot` at 5fps via this script and
+                               # ffmpeg-assembles the frames into device.mp4.
+VALIDATION_MATRIX.md           # Reference for what's validatable via Maestro today,
+                               # how each check is implemented, and what workspace
+                               # configuration each row depends on.
 ```
+
+All flows are parameterized with `appId: ${APP_ID}` — each sample repo's
+`run.sh` passes its own bundle id via `maestro test -e APP_ID=...`.
 
 ## Selector contract (the thing that makes shared flows possible)
 
