@@ -140,12 +140,19 @@ name: E2E — Campaign 141 full loop with real push delivery
 # already on the dashboard; otherwise navigate back. The SDK may ALSO be
 # rendering a modal from Campaign 141's in-app action at this point, so
 # dismiss any Continue that appears before waiting for the dashboard. ---
+# Android's `back` key may first dismiss a soft keyboard before actually
+# popping the fragment — if the event-entry screen's keyboard is still up,
+# one back is consumed by IME, so keep hitting back until the dashboard is
+# visible (capped by extendedWaitUntil). Also absorb a Continue modal that
+# Campaign 141's in-app action may raise right after the event fires.
 - runFlow:
     when:
       notVisible:
         id: "Custom Event Button|send_custom_event_button"
     commands:
       - back
+      - waitForAnimationToEnd:
+          timeout: 1500
 - runFlow:
     when:
       visible: "Continue"
@@ -153,6 +160,14 @@ name: E2E — Campaign 141 full loop with real push delivery
       - tapOn: "Continue"
       - waitForAnimationToEnd:
           timeout: 2000
+- runFlow:
+    when:
+      notVisible:
+        id: "Custom Event Button|send_custom_event_button"
+    commands:
+      - back
+      - waitForAnimationToEnd:
+          timeout: 1500
 - extendedWaitUntil:
     visible:
       id: "Custom Event Button|send_custom_event_button"
