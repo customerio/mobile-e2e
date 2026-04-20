@@ -136,25 +136,19 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Return to dashboard. Android samples use hardware back; iOS uses the
-# left-edge swipe. Do both — each platform honors the one it understands. ---
-- runFlow:
-    when:
-      visible:
-        id: "Custom Event Button|send_custom_event_button"
-    commands:
-      - assertVisible:
-          id: "Custom Event Button|send_custom_event_button"
-# Fallback navigation if still on the event form:
+# --- Return to dashboard. If the event screen auto-popped after Send, we're
+# already on the dashboard; otherwise navigate back. Use extendedWaitUntil
+# to absorb the either-or without a brittle branch. ---
 - runFlow:
     when:
       notVisible:
         id: "Custom Event Button|send_custom_event_button"
     commands:
       - back
-      - swipe:
-          start: 1%, 50%
-          end: 80%, 50%
+- extendedWaitUntil:
+    visible:
+      id: "Custom Event Button|send_custom_event_button"
+    timeout: 8000
 
 # --- Inline in-app visual proof (best-effort) ---
 # Campaign 141 also dispatches an inline action. Navigate to an Inline
