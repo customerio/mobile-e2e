@@ -1,0 +1,324 @@
+appId: ${APP_ID}
+tags:
+  - live-activities
+name: Live Activities — SDK lifecycle and optional backend/APNs delivery
+---
+# iOS-only Live Activities E2E:
+#   local: Maestro → SDK → ActivityKit → CDP start/end lifecycle events
+#   remote (opt-in): App API → services → APNs sandbox → ActivityKit
+#
+# Set MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=true through the one-command
+# `live-activities-remote` suite to run the real backend/APNs section.
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+- launchApp:
+    clearState: true
+
+# --- Identify a fresh customer ---
+- assertVisible:
+    id: "login_button"
+- tapOn:
+    id: "first_name_input"
+- inputText: "Maestro Live Activities Tester"
+- hideKeyboard
+- tapOn:
+    id: "email_input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "login_button"
+
+- assertVisible:
+    id: "custom_event_button"
+
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# --- Open the feature-PR Live Activities driver ---
+- scrollUntilVisible:
+    element:
+      id: "live_activities_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+- scrollUntilVisible:
+    element:
+      id: "live_activities_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_activities_button"
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "live_activity_end_all"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_activity_end_all"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*no activities.*"
+    timeout: 20000
+
+# --- Local ActivityKit start ---
+- scrollUntilVisible:
+    element:
+      id: "live_activity_segments_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_activity_segments_toggle"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*segments state=active status=Order placed.*"
+    timeout: 15000
+- takeScreenshot: artifacts/live_activities_01_local_start
+
+# Capture the exact SDK-minted id shown by the real ActivityKit activity.
+- copyTextFrom:
+    id: "live_activity_system_status"
+- runScript:
+    file: ../scripts/capture_live_activity_id.js
+    env:
+      LIVE_ACTIVITY_KIND: "segments"
+- assertTrue: ${output.capture_live_id_ok === "true"}
+
+# The SDK event is consumed by the Customer.io CDP destination and becomes a
+# device-sourced live_notification conversation. Assert that exact backend
+# record rather than looking for a generic customer activity.
+- runScript:
+    file: ../scripts/assert_live_notification_status.js
+    env:
+      LIVE_INSTANCE_ID: ${output.live_instance_id}
+      EXPECTED_STATE: "active"
+      EXPECTED_OPERATION: "start"
+      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+      EXPECTED_SOURCE: "device"
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.live_status_ok === "true"}
+- assertTrue: ${output.live_status_delivery_id !== ""}
+- evalScript: ${output.local_start_delivery_id = output.live_status_delivery_id}
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# --- Local ActivityKit update (intentionally no lifecycle event) ---
+- scrollUntilVisible:
+    element:
+      id: "live_activity_segments_update"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_activity_segments_update"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*segments state=active status=Preparing your order.*"
+    timeout: 15000
+- takeScreenshot: artifacts/live_activities_02_local_update
+
+# A local SDK update is intentionally ActivityKit-only. Hold the backend
+# conversation stable for several seconds and require its last delivery to
+# remain the original device-sourced start.
+- runScript:
+    file: ../scripts/assert_live_notification_status.js
+    env:
+      LIVE_INSTANCE_ID: ${output.live_instance_id}
+      EXPECTED_STATE: "active"
+      EXPECTED_OPERATION: "start"
+      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+      EXPECTED_SOURCE: "device"
+      EXPECTED_DELIVERY_ID: ${output.local_start_delivery_id}
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MIN_STABLE_MS: "8000"
+      MAX_WAIT_MS: "20000"
+- assertTrue: ${output.live_status_ok === "true"}
+
+# Capture the real system surface (Dynamic Island/Home Screen) as evidence.
+- pressKey: Home
+- waitForAnimationToEnd:
+    timeout: 2000
+- takeScreenshot: artifacts/live_activities_03_local_system_surface
+- launchApp:
+    stopApp: false
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# --- Local ActivityKit end ---
+- scrollUntilVisible:
+    element:
+      id: "live_activity_segments_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_activity_segments_toggle"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*(segments state=ended status=Delivered|no activities).*"
+    timeout: 20000
+- takeScreenshot: artifacts/live_activities_04_local_end
+
+# The same SDK-minted id must now be ended by a device-sourced backend
+# operation. Reusing output.live_instance_id is the correlation assertion.
+- runScript:
+    file: ../scripts/assert_live_notification_status.js
+    env:
+      LIVE_INSTANCE_ID: ${output.live_instance_id}
+      EXPECTED_STATE: "ended"
+      EXPECTED_OPERATION: "end"
+      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+      EXPECTED_SOURCE: "device"
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.live_status_ok === "true"}
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# --- Optional real backend → APNs sandbox → Simulator lane ---
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED == "true"}
+    commands:
+      # Backend push-to-start. A `sent` delivery followed by the unique run id
+      # appearing in ActivityKit proves the SDK's push-to-start registration
+      # reached Customer.io; the token event is also consumed by its dedicated
+      # CDP action, so it is not expected in the generic activity feed.
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "start"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runFlow:
+          when:
+            visible: "Continue"
+          commands:
+            - tapOn: "Continue"
+      - extendedWaitUntil:
+          visible:
+            id: "live_activity_system_status"
+            text: "(?s).*segments state=active status=Maestro remote start ${output.run_id_regex}.*"
+          timeout: 30000
+      - takeScreenshot: artifacts/live_activities_05_remote_start
+
+      # Backend update targeted with the SDK-registered instance token.
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "update"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runFlow:
+          when:
+            visible: "Continue"
+          commands:
+            - tapOn: "Continue"
+      - extendedWaitUntil:
+          visible:
+            id: "live_activity_system_status"
+            text: "(?s).*segments state=active status=Maestro remote update ${output.run_id_regex}.*"
+          timeout: 30000
+      - takeScreenshot: artifacts/live_activities_06_remote_update
+
+      - pressKey: Home
+      - waitForAnimationToEnd:
+          timeout: 2000
+      - takeScreenshot: artifacts/live_activities_07_remote_system_surface
+      - launchApp:
+          stopApp: false
+      - runFlow:
+          when:
+            visible: "Continue"
+          commands:
+            - tapOn: "Continue"
+
+      # Backend end and final rendered content.
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "end"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runFlow:
+          when:
+            visible: "Continue"
+          commands:
+            - tapOn: "Continue"
+      - extendedWaitUntil:
+          visible:
+            id: "live_activity_system_status"
+            text: "(?s).*segments state=ended status=Maestro remote end ${output.run_id_regex}.*"
+          timeout: 30000
+      - takeScreenshot: artifacts/live_activities_08_remote_end

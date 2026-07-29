@@ -23,11 +23,12 @@ usage() {
   printf '%s\n' 'Customer.io mobile SDK end-to-end runner.'
   printf '\nUsage:\n'
   printf '  ./e2e doctor --platform android|ios [--sdk-repo PATH]\n'
-  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline]\n'
+  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|live-activities|live-activities-remote]\n'
   printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
   printf '\nEnvironment overrides:\n'
   printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
-  printf '  MAESTRO_EXT_API_KEY, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
+  printf '  MAESTRO_EXT_API_KEY, MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
+  printf '  LIVE_ACTIVITY_APP_IDENTIFIER, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to 83 on Android and any post-move fence on iOS)\n'
 }
@@ -72,8 +73,14 @@ if [[ -z "$FLOW" ]]; then
     geofence) FLOW="geofence_basic.yaml" ;;
     campaign) FLOW="campaign_141.yaml" ;;
     inline) FLOW="inline_messages.yaml" ;;
+    live-activities|live-activities-remote) FLOW="live_activities.yaml" ;;
     *) die "unknown suite '$SUITE'" ;;
   esac
+fi
+
+FLOW_BASENAME="$(basename "$FLOW")"
+if [[ "$FLOW_BASENAME" == "live_activities.yaml" && "$PLATFORM" != "ios" ]]; then
+  die "the live activities flow requires --platform ios"
 fi
 
 if [[ -z "$SDK_REPO" ]]; then
@@ -106,8 +113,16 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
   set +a
 fi
+case "$SUITE" in
+  live-activities) MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=false ;;
+  live-activities-remote) MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=true ;;
+  *) : "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}" ;;
+esac
 : "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
-export MAESTRO_EXT_API_BASE_URL
+: "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
+: "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
+export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL
+export MAESTRO_APP_API_KEY MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED
 
 FLOW_NAME="$(basename "$FLOW" .yaml)"
 ARTIFACT_DIR="$SDK_REPO/artifacts/e2e/$PLATFORM/$FLOW_NAME"
@@ -161,6 +176,18 @@ validate_backend() {
     -H "Authorization: Bearer $MAESTRO_EXT_API_KEY" \
     "$MAESTRO_EXT_API_BASE_URL/customers?email=maestro-doctor-no-match%40cio.test") || true
   [[ "$status" == "200" ]] || die "Ext API preflight returned HTTP ${status:-unreachable} at $MAESTRO_EXT_API_BASE_URL"
+
+  if [[ "$FLOW_NAME" == "live_activities" ]]; then
+    if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
+      die "MAESTRO_APP_API_KEY still contains the placeholder value"
+    fi
+    status=$(curl -sS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+      -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $MAESTRO_APP_API_KEY" \
+      "$MAESTRO_LIVE_API_BASE_URL/live_notifications/01ARZ3NDEKTSV4RRFFQ69G5FAV") || true
+    [[ "$status" == "200" || "$status" == "400" || "$status" == "404" ]] \
+      || die "Live Notifications App API preflight returned HTTP ${status:-unreachable} at $MAESTRO_LIVE_API_BASE_URL"
+  fi
 }
 
 doctor() {

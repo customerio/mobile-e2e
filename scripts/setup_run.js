@@ -14,6 +14,7 @@ var rid = (typeof E2E_RUN_ID === "string" && E2E_RUN_ID.length > 0)
 var emailSafeRid = rid.replace(/[^a-zA-Z0-9._-]/g, "-")
 var customerNonce = Math.random().toString(36).substring(2, 8) + "-" + Date.now()
 output.run_id = rid
+output.run_id_regex = rid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 // A caller may reuse E2E_RUN_ID for correlation. Keep that exact event value,
 // but always identify a fresh customer so an older campaign message can never
 // satisfy this run's backend assertion.

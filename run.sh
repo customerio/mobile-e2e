@@ -27,17 +27,26 @@ TEST_OUTPUT_DIR="$OUT_DIR/maestro-artifacts"
 mkdir -p "$OUT_DIR" "$DEBUG_DIR"
 find "$DEBUG_DIR" -mindepth 1 -delete
 mkdir -p "$TEST_OUTPUT_DIR"
+find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
 
 # --- Env
+CALLER_REMOTE_FLAG_SET="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED+x}"
+CALLER_REMOTE_FLAG="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:-}"
 if [[ -f "$SAMPLE_MAESTRO_DIR/.env" ]]; then
   set -a; source "$SAMPLE_MAESTRO_DIR/.env"; set +a
+fi
+if [[ "$CALLER_REMOTE_FLAG_SET" == "x" ]]; then
+  MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED="$CALLER_REMOTE_FLAG"
 fi
 if [[ -z "${MAESTRO_EXT_API_KEY:-}" ]]; then
   echo "warn: MAESTRO_EXT_API_KEY not set; backend assertions will fail auth" >&2
 fi
 : "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
+: "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
+: "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
+: "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}"
 : "${E2E_SINK_PORT:=0}"
-export MAESTRO_EXT_API_BASE_URL
+export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL MAESTRO_APP_API_KEY
 : "${APP_ID:?APP_ID must be exported by the sample repo run.sh}"
 : "${PLATFORM:?PLATFORM must be exported by the sample repo run.sh (iOS or Android)}"
 
@@ -203,6 +212,10 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   --test-suite-name="Customer.io SDK $PLATFORM $FLOW_NAME" \
   -e "APP_ID=$APP_ID" \
   -e "MAESTRO_EXT_API_BASE_URL=$MAESTRO_EXT_API_BASE_URL" \
+  -e "MAESTRO_APP_API_KEY=${MAESTRO_APP_API_KEY:-}" \
+  -e "MAESTRO_LIVE_API_BASE_URL=$MAESTRO_LIVE_API_BASE_URL" \
+  -e "MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=$MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED" \
+  -e "LIVE_ACTIVITY_APP_IDENTIFIER=${LIVE_ACTIVITY_APP_IDENTIFIER:-}" \
   -e "E2E_SINK_BASE_URL=$E2E_SINK_BASE_URL" \
   -e "E2E_RUN_ID=${E2E_RUN_ID:-}" \
   -e "GEOFENCE_OUTSIDE_LATITUDE=${GEOFENCE_OUTSIDE_LATITUDE:-40.7000}" \
@@ -215,8 +228,8 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
 EXIT=$?
 set -e
 
-# Maestro persists imported flow variables in commands-*.json. Scrub the Ext
-# API key before the report renderer reads that JSON or CI can upload it.
+# Maestro persists imported flow variables in commands-*.json. Scrub backend
+# API keys before the report renderer reads that JSON or CI can upload it.
 if ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$OUT_DIR"; then
   echo "error: failed to sanitize E2E artifacts" >&2
   EXIT=1

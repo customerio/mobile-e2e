@@ -32,7 +32,7 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 
 ## The matrix
 
-### ✅ Currently covered (passing flows on iOS + Android)
+### ✅ Currently covered
 
 | Case | How |
 |---|---|
@@ -45,6 +45,16 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Android geofence transition reached backend | grant foreground/background permission, register fences, move inside City Hall Park, then assert `type=geofence` and `geofence_id=83` after movement |
 | iOS geofence transition reached backend | grant Always permission, register monitored conditions, move the simulator, then assert a first-class `type=geofence` activity after movement; set `GEOFENCE_ID` for exact workspace seeding |
 | Android geofence foreground recovery | background/foreground the sample after initial registration and validate the production foreground-retry path before movement |
+| iOS local Live Activity start/update/end | Drive the registered Segments example through stable IDs and assert the ActivityKit state/content probe after every operation |
+| iOS local Live Activity lifecycle reached backend | Copy the SDK-minted `cioInstanceId` from ActivityKit, poll `/v1/live_notifications/:id`, require device-sourced start/end on that same conversation, and hold the backend at its original start delivery for 8 seconds after a local-only update |
+
+### 🧪 Opt-in integration coverage
+
+| Case | How | Prerequisites |
+|---|---|---|
+| iOS backend push-to-start | Call `/v1/live_notifications/start`, poll status to `sent`, then match the unique run id in ActivityKit; successful delivery proves the SDK's consumed push-to-start registration reached Customer.io | Live Notifications plan, App API key, configured APNs sandbox key, supported Simulator host, and the dedicated `Live Notification Token` CDP action |
+| iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
+| Live Activity system surface | Background the app after local and remote updates and capture the Simulator Home/Dynamic Island surface | Dynamic Island-capable Simulator model |
 
 ### 🛠 Coverable with small additions (patterns exist, need either seeded campaigns or small sample-app work)
 
@@ -54,7 +64,7 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | **Page rule: in-app shows only on screen Y** | Navigate to screen Y → `assertVisible` on in-app body. Navigate to screen Z → `assertNotVisible`. | A campaign with a page-rule filter keyed to a screen name the sample actually emits via `CustomerIO.screen("Y")` |
 | **Frequency capping: same in-app doesn't show twice** | Trigger once, dismiss, assert visible. Trigger again, `extendedWaitUntil timeout` short, `assertNotVisible`. | A campaign with frequency cap configured |
 | **Action button on in-app fires tracking event + deep-link** | `tapOn` the action button inside the rendered in-app → `assertVisible` destination screen → `runScript` poll `/v1/messages/:id` for `metrics.clicked` or `metrics.action_taken` | Known campaign with a known action button label |
-| **Push received tracked (real device)** | After campaign fires, `openNotifications` on Android or `assertVisible` notification on iOS lock screen → `runScript` poll for `metrics.delivered` | Real device registered a valid FCM/APNs token. Emulators can't do this for real. |
+| **Push received tracked** | After campaign fires, `openNotifications` on Android or assert the iOS system surface, then poll for `metrics.delivered` | Real device, Android emulator with Google Play Services, or a supported iOS Simulator with valid APNs sandbox configuration |
 | **Push tap → deep link** | After `openNotifications` + `tapOn`, assert the expected in-app screen is shown | Real device + a campaign with a push containing a deep link |
 | **Profile attribute update visible on server** | tap `Set Profile Attribute` → fill name/value → `runScript` poll `/v1/customers/:cio_id/attributes` | Nothing extra — sample and Ext API both support this today |
 | **Device token registered for customer** | after login, `runScript` on `/v1/customers/:cio_id` looking for `devices[]` entry | Real device OR an emulator with Google Play Services + FCM |
@@ -65,9 +75,8 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 
 | Case | What's needed |
 |---|---|
-| Real push delivery on iOS simulator | `xcrun simctl push` wiring from inside a flow, or move to a real device lab |
-| **Live Notification / Live Activity start → update → end** | Merge the Android `feature/live-notifications` and iOS `feat/live-activities` work, expose stable sample controls/IDs, seed a backend trigger whose `run_id` is visible in the live surface, then assert callback receipt, rendered state, update, terminal dismissal, and backend message metrics. Android and iOS payload contracts must be tested independently. |
-| Live Notification background/cold-start delivery | Real-device lane or a proven virtual-device push injector; include token-registration races, callback payload preservation, tap intent/deep link, and restart recovery |
+| Android Live Notification start/update/end | Merge/adapt the Android feature, expose stable callback/render selectors, and test its FCM-specific payload contract independently |
+| Live Notification background/cold-start recovery | Add explicit process termination/relaunch scenarios and assert token-registration races, callback payload preservation, tap intent/deep link, and restart recovery |
 | Flutter full flow | Add `Semantics(identifier: ...)` wrappers to ~15 widgets in the Flutter sample |
 | WebView-based in-app content assertion | Maestro can read WebView text on Android if JS-accessible. On iOS, usually not. Fall back to screenshots. |
 | Rich push payloads (images, action buttons) on iOS | Real device + `xcrun simctl push` with rich JSON |
@@ -152,6 +161,8 @@ With these four seeded, every row in the "Coverable with small additions" sectio
 ./e2e run --platform ios --suite smoke
 ./e2e run --platform android --suite geofence
 ./e2e run --platform ios --suite geofence
+./e2e run --platform ios --suite live-activities
+./e2e run --platform ios --suite live-activities-remote
 ```
 
 The command provisions the emulator/simulator, builds and installs the sample,
