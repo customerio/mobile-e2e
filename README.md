@@ -32,11 +32,12 @@ From this repository:
 ./e2e run --platform ios --suite live-activities
 ```
 
-The runner discovers the local SDK repos by default. Use `--sdk-repo PATH` in a
-different checkout, `--skip-build` while iterating, `--keep-device` for visual
-debugging, and `--headless` in automation. Every run provisions or boots a
-compatible virtual device when none is available; no separately managed
-simulator is required.
+The runner discovers the local SDK repos by default. Use `--sdk-repo PATH` for a
+different checkout and `--skip-build` while iterating. Normal iOS runs restart a
+reused Simulator to keep XCUITest input deterministic; `--keep-device` preserves
+the current visual state for faster debugging. Use `--headless` in automation.
+Every run provisions or boots a compatible virtual device when none is
+available; no separately managed simulator is required.
 
 Credentials remain outside git. Configure each sample as usual and put an Ext
 API bearer token in the sample's `.maestro/.env`:
@@ -55,8 +56,8 @@ rendering, and a separate always-run CI sanitizer gates artifact upload.
 The iOS Live Activities suite has two lanes:
 
 ```bash
-# Local ActivityKit start/update/end plus the correlated Customer.io
-# live-notification conversation.
+# Local Segments, Delivery, and Countdown ActivityKit lifecycles with Lock
+# Screen/deep-link evidence plus the correlated Segments backend conversation.
 ./e2e run --platform ios --suite live-activities
 
 # The same checks plus App API → services → APNs sandbox → Simulator
@@ -234,8 +235,10 @@ uses a different workspace with overlapping fences, so its default contract is
 “at least one first-class `geofence` activity after the simulated crossing.”
 Set `GEOFENCE_ID=<id>` to make iOS enforce a specific seeded fence as well.
 
-The Live Activities suite currently targets the iOS feature branch/sample. It
-proves local ActivityKit state and SDK-to-backend lifecycle reporting on any
-compatible Simulator. The opt-in remote lane additionally proves real APNs
-sandbox delivery by matching a unique run id in ActivityKit after each App API
-operation; a backend `sent` status alone is not treated as device receipt.
+The local Live Activities lane drives the registered Segments, Delivery, and
+Countdown examples through start, in-place update, Lock Screen rendering,
+widget-URL re-entry, and final system state. It also correlates the Segments
+SDK-minted instance with device-sourced Customer.io start/end deliveries. The
+opt-in remote lane additionally proves real APNs sandbox delivery by matching a
+unique run id in ActivityKit after each App API operation; a backend `sent`
+status alone is not treated as device receipt.

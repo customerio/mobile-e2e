@@ -298,6 +298,16 @@ start_ios_device() {
     '[.devices[][] | select(.state == "Booted") | select(.name | startswith("iPhone"))][0].udid // empty')
   if [[ -n "$booted" ]]; then
     DEVICE_ID="$booted"
+    if [[ "$KEEP_DEVICE" == 0 ]]; then
+      # Repeated XCUITest sessions can leave Simulator's text-input service in
+      # a state where Maestro reports inputText success but drops the value.
+      # A normal run favors determinism; --keep-device intentionally preserves
+      # the faster iteration behavior and the current visual state.
+      note "restarting iOS Simulator $booted for a clean automation session"
+      xcrun simctl shutdown "$booted"
+      xcrun simctl boot "$booted"
+      xcrun simctl bootstatus "$booted" -b
+    fi
     note "reusing iOS Simulator $booted"
     return
   fi

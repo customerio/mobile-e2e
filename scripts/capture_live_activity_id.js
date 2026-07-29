@@ -7,16 +7,28 @@
 // Output:
 //   output.capture_live_id_ok
 //   output.live_instance_id
+//   output.live_activitykit_id
+//   output.live_activity_kind_count
 
 (function () {
     var text = String(maestro.copiedText || "")
     var kind = String(LIVE_ACTIVITY_KIND || "")
     var escapedKind = kind.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-    var pattern = new RegExp(
-        "(?:^|\\n)" + escapedKind + " state=[^\\n]* id=([0-9A-HJKMNP-TV-Z]{26})(?:\\n|$)")
-    var match = text.match(pattern)
+    var linePattern = new RegExp(
+        "(?:^|\\n)" + escapedKind +
+        " state=[^\\n]* activityId=([^ \\n]+) id=([0-9A-HJKMNP-TV-Z]{26})(?=\\n|$)",
+        "g")
+    var matches = []
+    var match
+    while ((match = linePattern.exec(text)) !== null) {
+        matches.push(match)
+    }
 
-    output.capture_live_id_ok = match ? "true" : "false"
-    output.capture_live_id_reason = match ? "matched" : "instance_id_not_found"
-    output.live_instance_id = match ? match[1] : ""
+    output.live_activity_kind_count = String(matches.length)
+    output.capture_live_id_ok = matches.length === 1 ? "true" : "false"
+    output.capture_live_id_reason = matches.length === 1
+        ? "matched_one_activity"
+        : (matches.length === 0 ? "activity_not_found" : "multiple_activities_found")
+    output.live_activitykit_id = matches.length === 1 ? matches[0][1] : ""
+    output.live_instance_id = matches.length === 1 ? matches[0][2] : ""
 })()

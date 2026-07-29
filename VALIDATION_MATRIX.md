@@ -45,7 +45,7 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Android geofence transition reached backend | grant foreground/background permission, register fences, move inside City Hall Park, then assert `type=geofence` and `geofence_id=83` after movement |
 | iOS geofence transition reached backend | grant Always permission, register monitored conditions, move the simulator, then assert a first-class `type=geofence` activity after movement; set `GEOFENCE_ID` for exact workspace seeding |
 | Android geofence foreground recovery | background/foreground the sample after initial registration and validate the production foreground-retry path before movement |
-| iOS local Live Activity start/update/end | Drive the registered Segments example through stable IDs and assert the ActivityKit state/content probe after every operation |
+| iOS local Live Activity visual lifecycle | Drive the registered Segments, Delivery, and Countdown examples through start/update/end; require one stable ActivityKit and Customer.io instance per template; assert active/final Lock Screen content; tap the card and verify widget-URL re-entry to the Live Activities screen; save each state as evidence |
 | iOS local Live Activity lifecycle reached backend | Copy the SDK-minted `cioInstanceId` from ActivityKit, poll `/v1/live_notifications/:id`, require device-sourced start/end on that same conversation, and hold the backend at its original start delivery for 8 seconds after a local-only update |
 
 ### 🧪 Opt-in integration coverage
@@ -54,7 +54,7 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 |---|---|---|
 | iOS backend push-to-start | Call `/v1/live_notifications/start`, poll status to `sent`, then match the unique run id in ActivityKit; successful delivery proves the SDK's consumed push-to-start registration reached Customer.io | Live Notifications plan, App API key, configured APNs sandbox key, supported Simulator host, and the dedicated `Live Notification Token` CDP action |
 | iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
-| Live Activity system surface | Background the app after local and remote updates and capture the Simulator Home/Dynamic Island surface | Dynamic Island-capable Simulator model |
+| Remote Live Activity system surface | Background the app after remote updates and capture the Simulator system presentation | Dynamic Island-capable Simulator model |
 
 ### 🛠 Coverable with small additions (patterns exist, need either seeded campaigns or small sample-app work)
 

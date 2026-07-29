@@ -27,11 +27,18 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     id: "email_input"
 - inputText: ${output.email}
 - hideKeyboard
+# Fail at the actual cause if a stale XCUITest keyboard session drops input.
+# Rebooting the selected Simulator restores input without changing app state.
+- assertVisible:
+    id: "first_name_input"
+    text: "Maestro Live Activities Tester"
+- assertVisible:
+    id: "email_input"
+    text: ${output.email}
 - tapOn:
     id: "login_button"
-
-- assertVisible:
-    id: "custom_event_button"
+- waitForAnimationToEnd:
+    timeout: 3000
 
 - runFlow:
     when:
@@ -45,13 +52,18 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     commands:
       - tapOn: "Continue"
 
+- extendedWaitUntil:
+    visible:
+      id: "custom_event_button"
+    timeout: 30000
+
 # --- Open the feature-PR Live Activities driver ---
 - scrollUntilVisible:
     element:
       id: "live_activities_button"
     direction: DOWN
     timeout: 15000
-    centerElement: true
+    centerElement: false
 - runFlow:
     when:
       visible: "Continue"
@@ -62,7 +74,7 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "live_activities_button"
     direction: DOWN
     timeout: 15000
-    centerElement: true
+    centerElement: false
 - tapOn:
     id: "live_activities_button"
 - runFlow:
@@ -79,7 +91,76 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "live_activity_end_all"
     direction: DOWN
     timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_end_all"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
     centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*no activities.*"
+    timeout: 20000
+
+# --- One-time iOS Live Activities consent warm-up ---
+# Simulator can delay the first and second system consent sheets until after an
+# accessibility probe. Exercise both button/card overlap states before taking
+# measured visual evidence, then clean up the disposable activity.
+- scrollUntilVisible:
+    element:
+      id: "live_activity_segments_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_segments_toggle"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*segments state=active status=Order placed.*"
+    timeout: 15000
+- pressKey: Lock
+- waitForAnimationToEnd:
+    timeout: 2000
+- tapOn:
+    point: "71%,80%"
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- tapOn:
+    point: "71%,80%"
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- tapOn:
+    point: "71%,80%"
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "live_activity_end_all"
+    direction: UP
+    timeout: 15000
+    centerElement: false
 - tapOn:
     id: "live_activity_end_all"
 - scrollUntilVisible:
@@ -100,7 +181,7 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "live_activity_segments_toggle"
     direction: DOWN
     timeout: 15000
-    centerElement: true
+    centerElement: false
 - tapOn:
     id: "live_activity_segments_toggle"
 - scrollUntilVisible:
@@ -124,6 +205,9 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     env:
       LIVE_ACTIVITY_KIND: "segments"
 - assertTrue: ${output.capture_live_id_ok === "true"}
+- assertTrue: ${output.live_activity_kind_count === "1"}
+- evalScript: ${output.local_segments_activitykit_id = output.live_activitykit_id}
+- evalScript: ${output.local_segments_instance_id = output.live_instance_id}
 
 # The SDK event is consumed by the Customer.io CDP destination and becomes a
 # device-sourced live_notification conversation. Assert that exact backend
@@ -169,6 +253,19 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     timeout: 15000
 - takeScreenshot: artifacts/live_activities_02_local_update
 
+# Prove the update changed the existing system activity in place. A second
+# activity, a changed ActivityKit id, or a changed Customer.io id all fail.
+- copyTextFrom:
+    id: "live_activity_system_status"
+- runScript:
+    file: ../scripts/capture_live_activity_id.js
+    env:
+      LIVE_ACTIVITY_KIND: "segments"
+- assertTrue: ${output.capture_live_id_ok === "true"}
+- assertTrue: ${output.live_activity_kind_count === "1"}
+- assertTrue: ${output.live_activitykit_id === output.local_segments_activitykit_id}
+- assertTrue: ${output.live_instance_id === output.local_segments_instance_id}
+
 # A local SDK update is intentionally ActivityKit-only. Hold the backend
 # conversation stable for several seconds and require its last delivery to
 # remain the original device-sourced start.
@@ -186,13 +283,54 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       MAX_WAIT_MS: "20000"
 - assertTrue: ${output.live_status_ok === "true"}
 
-# Capture the real system surface (Dynamic Island/Home Screen) as evidence.
-- pressKey: Home
+# Capture the full system-owned Lock Screen card while the original screen still
+# owns the local handle needed for the subsequent SDK end operation.
+- pressKey: Lock
 - waitForAnimationToEnd:
     timeout: 2000
+- extendedWaitUntil:
+    visible: ".*Preparing your order.*"
+    timeout: 15000
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      # iOS can present consent on top of each locally created activity.
+      # Dismiss it before capturing visual evidence of the system card.
+      - tapOn: "Allow"
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "2000"
+- runFlow:
+    when:
+      visible: "Always Allow"
+    commands:
+      - tapOn: "Always Allow"
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*Preparing your order.*"
+    timeout: 15000
 - takeScreenshot: artifacts/live_activities_03_local_system_surface
-- launchApp:
-    stopApp: false
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
+- takeScreenshot: artifacts/live_activities_04_local_app_return
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+    timeout: 15000
 - runFlow:
     when:
       visible: "Continue"
@@ -219,7 +357,7 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "live_activity_system_status"
       text: "(?s).*(segments state=ended status=Delivered|no activities).*"
     timeout: 20000
-- takeScreenshot: artifacts/live_activities_04_local_end
+- takeScreenshot: artifacts/live_activities_05_local_end
 
 # The same SDK-minted id must now be ended by a device-sourced backend
 # operation. Reusing output.live_instance_id is the correlation assertion.
@@ -239,6 +377,146 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       visible: "Continue"
     commands:
       - tapOn: "Continue"
+
+# The ended card remains on the Lock Screen by design. Capture its final
+# rendered state, then dismiss it before starting another template so iOS does
+# not keep the old card foregrounded over the next active one.
+- pressKey: Lock
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*Delivered.*"
+    timeout: 15000
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "2000"
+- runFlow:
+    when:
+      visible: "Always Allow"
+    commands:
+      - tapOn: "Always Allow"
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*Delivered.*"
+    timeout: 15000
+- takeScreenshot: artifacts/live_activities_05b_local_end_system_surface
+- swipe:
+    # The compact card sits in the bottom fifth of this fixed Simulator. Keep
+    # the dismissal gesture inside its body so it cannot hit the empty area.
+    start: "90%,82%"
+    end: "10%,82%"
+    duration: 600
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
+
+# --- Additional registered-template visual acceptance ---
+# These reuse the same black-box path as Segments and explicitly prove that an
+# update retains one ActivityKit id and renders on the Lock Screen.
+- runFlow:
+    file: live_activity_visual_template.yaml
+    env:
+      LIVE_ACTIVITY_KIND: "delivery"
+      LIVE_ACTIVITY_STATE_FIELD: "title"
+      LIVE_ACTIVITY_START_TEXT: "Order placed"
+      LIVE_ACTIVITY_UPDATE_TEXT: "Preparing your order…"
+      LIVE_ACTIVITY_END_TEXT: "Delivered"
+      LIVE_ACTIVITY_LOCK_SCREEN_TEXT: "Preparing your order…"
+      LIVE_ACTIVITY_SCREENSHOT_PREFIX: "live_activities_06_delivery"
+
+- runFlow:
+    file: live_activity_visual_template.yaml
+    env:
+      LIVE_ACTIVITY_KIND: "countdown"
+      LIVE_ACTIVITY_STATE_FIELD: "title"
+      LIVE_ACTIVITY_START_TEXT: "Flash sale ends in"
+      LIVE_ACTIVITY_UPDATE_TEXT: "Almost gone!"
+      LIVE_ACTIVITY_END_TEXT: "Sale ended"
+      LIVE_ACTIVITY_LOCK_SCREEN_TEXT: "Almost gone!"
+      LIVE_ACTIVITY_SCREENSHOT_PREFIX: "live_activities_07_countdown"
+
+# --- Independent system-card deep-link proof ---
+# Use a fresh activity after all visual lifecycles are complete. Routing creates
+# a new screen instance, so this probe intentionally cleans up through the
+# screen-wide ActivityKit control rather than a per-driver handle.
+- scrollUntilVisible:
+    element:
+      id: "live_activity_segments_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_segments_toggle"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*segments state=active status=Order placed.*"
+    timeout: 15000
+- tapOn:
+    point: "8%,9%"
+- extendedWaitUntil:
+    visible:
+      id: "custom_event_button"
+    timeout: 15000
+- pressKey: Lock
+- waitForAnimationToEnd:
+    timeout: 2000
+- takeScreenshot: artifacts/live_activities_08_deep_link_system_surface
+- tapOn:
+    # This point is the delayed "Always Allow" action when the consent sheet is
+    # present and remains inside the card when permission was already granted.
+    point: "71%,80%"
+- waitForAnimationToEnd:
+    timeout: 2000
+- tapOn:
+    # WidgetKit exposes incorrect child bounds on Simulator; use the fixed card center.
+    point: "50%,79%"
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
+- takeScreenshot: artifacts/live_activities_09_deep_link_destination
+- scrollUntilVisible:
+    element:
+      id: "live_activity_end_all"
+    direction: UP
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_end_all"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*no activities.*"
+    timeout: 20000
 
 # --- Optional real backend → APNs sandbox → Simulator lane ---
 - runFlow:
