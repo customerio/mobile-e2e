@@ -17,7 +17,9 @@ iOS sample repo; both repos share identical patterns.
 | `tapOn`, `inputText`, `swipe`, `back`, `hideKeyboard` | UI driving | Navigation + interaction |
 
 **Not available (important to know):**
-- No `setTimeout` / `Thread.sleep` / `await` in the script runtime — wait has to come from YAML (`extendedWaitUntil`, `retry`) or from HTTP round-trip latency.
+- No `setTimeout` / `Thread.sleep` / `await` in the script runtime. The harness
+  uses a bounded `wait.js` busy wait between external transitions and polling
+  loops with explicit maximum budgets for backend assertions.
 - No way to speak MySQL or gRPC directly — only HTTP. We query the Customer.io Ext API (`https://api.customer.io/v1/...`).
 - WebView-rendered content is sometimes invisible to the accessibility tree. In this sample, the in-app modal uses native text views, so it's fine. Rich HTML in-apps may not be.
 
@@ -36,10 +38,13 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 |---|---|
 | SDK identify reached the server | `runScript: assert_message_delivered.js` polls `/v1/customers?email=<unique>` → resolves cio_id |
 | Identify triggered the expected segment campaign | same script then polls `/v1/customers/:cio_id/messages`, matches `type=in_app` with `metrics.sent` populated |
-| In-app modal actually rendered on screen | `extendedWaitUntil: visible: "Continue"` + `assertVisible: ".*Thank you for choosing.*"` + `takeScreenshot` |
-| Modal dismissed correctly | `tapOn: "Continue"` + `assertNotVisible` |
-| Server drafted a push for this customer | `runScript` polling, match `type=push` with `metrics.drafted` |
-| Custom event form works | tap the sequence, send event with `run_id` property |
+| In-app modal rendered when this installation is eligible | conditional `assertVisible: ".*Thank you for choosing.*"` + `takeScreenshot`; backend dispatch remains the hard assertion because repeat-run eligibility is workspace state |
+| Modal dismissed correctly | conditional `tapOn: "Continue"` + `assertNotVisible` |
+| Exact custom event persisted | send `maestro_test_event` with a unique `run_id`, then poll `/v1/customers/:cio_id/activities` for both exact values after the run start |
+| SDK one-shot location reached backend | move the virtual device outside, tap `Request location once (SDK)`, then poll for `event=CIO Location Update` with both exact latitude and longitude |
+| Android geofence transition reached backend | grant foreground/background permission, register fences, move inside City Hall Park, then assert `type=geofence` and `geofence_id=83` after movement |
+| iOS geofence transition reached backend | grant Always permission, register monitored conditions, move the simulator, then assert a first-class `type=geofence` activity after movement; set `GEOFENCE_ID` for exact workspace seeding |
+| Android geofence foreground recovery | background/foreground the sample after initial registration and validate the production foreground-retry path before movement |
 
 ### 🛠 Coverable with small additions (patterns exist, need either seeded campaigns or small sample-app work)
 
@@ -61,6 +66,8 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Case | What's needed |
 |---|---|
 | Real push delivery on iOS simulator | `xcrun simctl push` wiring from inside a flow, or move to a real device lab |
+| **Live Notification / Live Activity start → update → end** | Merge the Android `feature/live-notifications` and iOS `feat/live-activities` work, expose stable sample controls/IDs, seed a backend trigger whose `run_id` is visible in the live surface, then assert callback receipt, rendered state, update, terminal dismissal, and backend message metrics. Android and iOS payload contracts must be tested independently. |
+| Live Notification background/cold-start delivery | Real-device lane or a proven virtual-device push injector; include token-registration races, callback payload preservation, tap intent/deep link, and restart recovery |
 | Flutter full flow | Add `Semantics(identifier: ...)` wrappers to ~15 widgets in the Flutter sample |
 | WebView-based in-app content assertion | Maestro can read WebView text on Android if JS-accessible. On iOS, usually not. Fall back to screenshots. |
 | Rich push payloads (images, action buttons) on iOS | Real device + `xcrun simctl push` with rich JSON |
@@ -91,7 +98,6 @@ Template:
 - runScript:
     file: scripts/assert_message_delivered.js
     env:
-      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "in_app"
       MIN_METRIC: "human_opened"  # proves the render happened, not just dispatch
@@ -139,7 +145,27 @@ If we later land dedicated test campaigns in the test-prod workspace:
 
 With these four seeded, every row in the "Coverable with small additions" section above becomes a working flow.
 
-## Artifacts each run produces
+## One-command execution and artifacts
+
+```bash
+./e2e run --platform android --suite smoke
+./e2e run --platform ios --suite smoke
+./e2e run --platform android --suite geofence
+./e2e run --platform ios --suite geofence
+```
+
+The command provisions the emulator/simulator, builds and installs the sample,
+prepares location permission where needed, runs Maestro, polls the backend, and
+collects evidence under the selected SDK repo:
+
+`artifacts/e2e/<platform>/<flow>/`
+
+That directory contains the Maestro report/debug bundle, `sink.jsonl`, device
+logs, screenshots, raw video, the self-contained `tickmarks.html`, and JUnit XML
+in CI. The sink distinguishes UI success from backend success and includes the
+matched message/activity IDs and payload fields.
+
+## Raw Maestro artifacts
 
 Every `maestro test` run drops in `~/.maestro/tests/<timestamp>/`:
 - `commands-*.json` — full command-by-command status
@@ -147,5 +173,6 @@ Every `maestro test` run drops in `~/.maestro/tests/<timestamp>/`:
 - `screenshot-❌-*.png` — on failure, the screen at the moment of fail
 - `artifacts/<name>.png` — anything we explicitly capture via `takeScreenshot`
 
-Those screenshots are what we commit as the visual proof record. Running with
-`--format=JUNIT` also produces a JUnit XML that slots into any CI system.
+The harness copies the relevant evidence into its per-run artifact directory.
+Running in CI selects JUnit output automatically; local runs use the detailed
+HTML format.

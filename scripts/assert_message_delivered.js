@@ -26,7 +26,9 @@
 //   output.messages_seen  (JSON string; last observation)
 
 (function () {
-    var BASE = "https://api.customer.io/v1"
+    var BASE = (typeof MAESTRO_EXT_API_BASE_URL === "string" && MAESTRO_EXT_API_BASE_URL.length > 0)
+        ? MAESTRO_EXT_API_BASE_URL.replace(/\/$/, "")
+        : "https://api.customer.io/v1"
     var TYPE = EXPECTED_TYPE
     var MIN = (typeof MIN_METRIC === "string" && MIN_METRIC.length > 0) ? MIN_METRIC : "sent"
     var MAX = parseInt(
@@ -35,7 +37,10 @@
         (typeof POLL_INTERVAL_MS === "string" && POLL_INTERVAL_MS) ? POLL_INTERVAL_MS : "750", 10)
     var AUTH = { "Authorization": "Bearer " + MAESTRO_EXT_API_KEY }
     // Local sink for surfacing backend values in the rendered HTML report.
-    var SINK = "http://127.0.0.1:8899/assert"
+    var SINK_BASE = (typeof E2E_SINK_BASE_URL === "string" && E2E_SINK_BASE_URL.length > 0)
+        ? E2E_SINK_BASE_URL.replace(/\/$/, "")
+        : "http://127.0.0.1:8899"
+    var SINK = SINK_BASE + "/assert"
     var CAMP = (typeof CAMPAIGN_ID === "string") ? CAMPAIGN_ID : ""
 
     output.assert_ok = "false"

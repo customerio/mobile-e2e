@@ -1,14 +1,15 @@
 appId: ${APP_ID}
 tags:
   - smoke
-name: Smoke — login → in-app delivered → custom event
+name: Smoke — identify → campaign dispatch → custom event persisted
 ---
 # Fast smoke check of the identify path. Validates:
 #   1. The sample app logs in with a fresh email.
 #   2. The backend receives the identify and campaign 55 ("New CIO Tester")
 #      dispatches an in_app (sent metric populated).
-#   3. The welcome in-app modal renders on the device and can be dismissed.
-#   4. A custom event fires with a unique run_id property for traceability.
+#   3. If the workspace delivers the welcome modal to this installation, it
+#      renders on the device and can be dismissed.
+#   4. A custom event with the unique run_id is persisted by the backend.
 #
 # Runs unchanged on iOS (APN-UIKit) and Android (java_layout) thanks to
 # the unified snake_case selector vocabulary.
@@ -40,21 +41,25 @@ name: Smoke — login → in-app delivered → custom event
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
-      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "in_app"
       MIN_METRIC: "sent"
       MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Visual proof: welcome modal rendered + dismissed ---
-- extendedWaitUntil:
-    visible: "Continue"
-    timeout: 20000
-- assertVisible: ".*Thank you for choosing.*"
-- takeScreenshot: artifacts/smoke_01_modal
-- tapOn: "Continue"
-- assertNotVisible: ".*Thank you for choosing.*"
+# --- Visual proof when the identify campaign is eligible on this device ---
+# Backend dispatch is the hard contract above. Rendering is conditional because
+# campaign eligibility and installation state belong to workspace configuration.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - assertVisible: ".*Thank you for choosing.*"
+      - takeScreenshot: artifacts/smoke_01_modal
+      - tapOn: "Continue"
+      - assertNotVisible: ".*Thank you for choosing.*"
 
 # --- Custom event with run_id for traceability ---
 - tapOn:
@@ -66,15 +71,25 @@ name: Smoke — login → in-app delivered → custom event
 - tapOn:
     id: "event_name_input"
 - inputText: "maestro_test_event"
-- hideKeyboard
 - tapOn:
     id: "property_name_input"
 - inputText: "run_id"
-- hideKeyboard
 - tapOn:
     id: "property_value_input"
 - inputText: ${output.run_id}
-- hideKeyboard
+# UIKit's custom-event fields need a neutral tap, while Android's Gboard needs
+# the native keyboard command before the form can scroll to its submit button.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          point: "50%,25%"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - scrollUntilVisible:
     element:
       text: "^Send Event$"
@@ -82,3 +97,20 @@ name: Smoke — login → in-app delivered → custom event
     timeout: 10000
 - tapOn:
     id: "send_event_button"
+
+# --- Backend assertion: exact custom event + per-run property arrived ---
+- runScript:
+    file: ../scripts/assert_customer_activity.js
+    env:
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_ACTIVITY_TYPE: "event"
+      EXPECTED_ACTIVITY_NAME: "maestro_test_event"
+      EXPECTED_PROPERTY_NAME: "run_id"
+      EXPECTED_PROPERTY_VALUE: ${output.run_id}
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "45000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- takeScreenshot: artifacts/smoke_02_event_confirmed

@@ -1,0 +1,170 @@
+appId: ${APP_ID}
+tags:
+  - geofence
+  - location
+name: Geofence — outside → inside → backend transition
+---
+# Cross-platform geofence E2E contract:
+#   fresh identified customer
+#     → Always location permission
+#       → SDK fetches an outside location and registers nearby fences
+#         → simulator moves inside a seeded fence
+#           → SDK sends the transition
+#             → Ext API exposes the matching `geofence` activity.
+#
+# Defaults target the seeded City Hall Park fence in the test workspace.
+# Coordinates and expected id can be overridden by the one-command runner.
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+- launchApp:
+    # The one-command runner already reset app storage, then granted Always /
+    # background location. Clearing here would revoke that deterministic grant.
+    clearState: false
+
+- setLocation:
+    latitude: ${GEOFENCE_OUTSIDE_LATITUDE}
+    longitude: ${GEOFENCE_OUTSIDE_LONGITUDE}
+
+# A freshly created Google APIs image can surface a one-time launcher ANR while
+# Play services finish cold-start work. It is infrastructure noise, not app UI.
+- runFlow:
+    when:
+      visible: ".*Launcher isn't responding"
+    commands:
+      - tapOn: "Close app"
+
+# --- Identify a unique customer ---
+- assertVisible:
+    id: "login_button"
+- tapOn:
+    id: "first_name_input"
+- inputText: "Maestro Geofence Tester"
+- hideKeyboard
+- tapOn:
+    id: "email_input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "login_button"
+
+- assertVisible:
+    id: "custom_event_button"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# The welcome in-app can arrive just after Maestro's first conditional window
+# closes. Give the async campaign stream one more bounded chance before opening
+# the location screen so a late modal cannot intercept that tap.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# --- Ask the SDK for the outside location so it fetches/registers fences ---
+- scrollUntilVisible:
+    element:
+      id: "location_test_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "location_test_button"
+    point: "10%,50%"
+    retryTapIfNoChange: true
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+- assertVisible: "^Location Test$"
+- scrollUntilVisible:
+    element:
+      id: "request_sdk_location_once"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "request_sdk_location_once"
+    point: "10%,50%"
+    retryTapIfNoChange: true
+
+# A one-shot fused/Core Location request is not instantaneous on a cold virtual
+# device. Wait for the SDK's location analytics event before moving; otherwise
+# the first callback can race and observe the inside coordinate.
+- runScript:
+    file: ../scripts/assert_customer_activity.js
+    env:
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_ACTIVITY_TYPE: "event"
+      EXPECTED_ACTIVITY_NAME: "CIO Location Update"
+      EXPECTED_PROPERTY_NAME: "latitude"
+      EXPECTED_PROPERTY_VALUE: ${GEOFENCE_OUTSIDE_LATITUDE}
+      EXPECTED_PROPERTY_NAME_2: "longitude"
+      EXPECTED_PROPERTY_VALUE_2: ${GEOFENCE_OUTSIDE_LONGITUDE}
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "60000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "8000"
+
+# Android's geofence fetch records a foreground retry when the initial sync
+# times out. Exercise that production recovery path after a live fix exists,
+# then leave enough time for registration before crossing the boundary.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - stopApp
+      - launchApp:
+          clearState: false
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "20000"
+
+# --- Cross into the seeded fence ---
+- runScript:
+    file: ../scripts/mark_time.js
+- setLocation:
+    latitude: ${GEOFENCE_INSIDE_LATITUDE}
+    longitude: ${GEOFENCE_INSIDE_LONGITUDE}
+
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "5000"
+
+# --- Hard backend assertion: exact geofence persisted for this run's customer ---
+# Backend ingestion promotes the SDK's `Geofence Transition` track payload to
+# the first-class `geofence` activity model, whose ids use snake_case.
+- runScript:
+    file: ../scripts/assert_customer_activity.js
+    env:
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_ACTIVITY_TYPE: "geofence"
+      EXPECTED_ACTIVITY_NAME: ""
+      EXPECTED_PROPERTY_NAME: ${GEOFENCE_EXPECTED_PROPERTY}
+      EXPECTED_PROPERTY_VALUE: ${GEOFENCE_ID}
+      MIN_TIMESTAMP_SECONDS: ${output.action_started_at_seconds}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- takeScreenshot: artifacts/geofence_01_transition_confirmed

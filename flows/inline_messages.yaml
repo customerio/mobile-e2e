@@ -75,7 +75,6 @@ name: Inline in-app — render + position template
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
-      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "in_app"
       MIN_METRIC: "sent"
