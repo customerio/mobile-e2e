@@ -10,7 +10,9 @@
 // Optional env:
 //   MAESTRO_LIVE_API_BASE_URL (defaults to MAESTRO_EXT_API_BASE_URL)
 //   LIVE_NOTIFICATION_TYPE
-//   LIVE_ACTIVITY_APP_IDENTIFIER
+//   LIVE_NOTIFICATION_PLATFORM (default ios)
+//   LIVE_NOTIFICATION_APP_IDENTIFIER (falls back to LIVE_ACTIVITY_APP_IDENTIFIER)
+//   LIVE_NOTIFICATION_DEEP_LINK (default apn-uikit://live-activities on iOS)
 //   MAX_WAIT_MS / POLL_INTERVAL_MS
 //   E2E_SINK_BASE_URL
 //
@@ -21,6 +23,20 @@
     var TYPE = (typeof LIVE_NOTIFICATION_TYPE === "string" && LIVE_NOTIFICATION_TYPE.length > 0)
         ? LIVE_NOTIFICATION_TYPE
         : "io.customer.livenotifications.segments"
+    var PLATFORM = (typeof LIVE_NOTIFICATION_PLATFORM === "string" &&
+        LIVE_NOTIFICATION_PLATFORM.length > 0)
+        ? LIVE_NOTIFICATION_PLATFORM.toLowerCase()
+        : "ios"
+    var APP_IDENTIFIER = (typeof LIVE_NOTIFICATION_APP_IDENTIFIER === "string" &&
+        LIVE_NOTIFICATION_APP_IDENTIFIER.length > 0)
+        ? LIVE_NOTIFICATION_APP_IDENTIFIER
+        : ((typeof LIVE_ACTIVITY_APP_IDENTIFIER === "string" &&
+            LIVE_ACTIVITY_APP_IDENTIFIER.length > 0)
+            ? LIVE_ACTIVITY_APP_IDENTIFIER
+            : "")
+    var DEEP_LINK = (typeof LIVE_NOTIFICATION_DEEP_LINK === "string")
+        ? LIVE_NOTIFICATION_DEEP_LINK
+        : (PLATFORM === "ios" ? "apn-uikit://live-activities" : "")
     var rawBase = (typeof MAESTRO_LIVE_API_BASE_URL === "string" && MAESTRO_LIVE_API_BASE_URL.length > 0)
         ? MAESTRO_LIVE_API_BASE_URL
         : ((typeof MAESTRO_EXT_API_BASE_URL === "string" && MAESTRO_EXT_API_BASE_URL.length > 0)
@@ -94,7 +110,9 @@
         var complete = action === "start" ? 1 : (action === "update" ? 2 : 3)
         return {
             status: labels[action],
-            substatus: "Customer.io backend to APNs sandbox",
+            substatus: PLATFORM === "android"
+                ? "Customer.io backend to FCM"
+                : "Customer.io backend to APNs sandbox",
             segmentsTotal: 3,
             segmentsComplete: complete,
             trailingText: complete + "/3"
@@ -105,6 +123,10 @@
         output.live_request_reason = "unsupported_action_" + ACTION
         return
     }
+    if (PLATFORM !== "ios" && PLATFORM !== "android") {
+        output.live_request_reason = "unsupported_platform_" + PLATFORM
+        return
+    }
 
     var instanceId = String(output.remote_live_instance_id || "")
     var payload
@@ -112,21 +134,25 @@
         payload = {
             identifiers: { email: RUN_EMAIL },
             notification_type: TYPE,
-            platform: "ios",
+            platform: PLATFORM,
             attributes: { header: "Maestro " + RUN_ID },
             content_state: stateFor("start"),
-            push_payload: {
+            expiration: Math.floor(Date.now() / 1000) + 3600
+        }
+        if (PLATFORM === "ios") {
+            payload.push_payload = {
                 alert: {
                     title: "Maestro Live Activity",
                     body: "Remote start " + RUN_ID,
                     sound: "default"
                 }
-            },
-            deep_link: "apn-uikit://live-activities",
-            expiration: Math.floor(Date.now() / 1000) + 3600
+            }
         }
-        if (typeof LIVE_ACTIVITY_APP_IDENTIFIER === "string" && LIVE_ACTIVITY_APP_IDENTIFIER.length > 0) {
-            payload.app_identifier = LIVE_ACTIVITY_APP_IDENTIFIER
+        if (APP_IDENTIFIER) {
+            payload.app_identifier = APP_IDENTIFIER
+        }
+        if (DEEP_LINK) {
+            payload.deep_link = DEEP_LINK
         }
     } else {
         if (!instanceId) {
@@ -135,8 +161,10 @@
         }
         payload = {
             instance_id: instanceId,
-            content_state: stateFor(ACTION),
-            deep_link: "apn-uikit://live-activities"
+            content_state: stateFor(ACTION)
+        }
+        if (DEEP_LINK) {
+            payload.deep_link = DEEP_LINK
         }
     }
 

@@ -23,12 +23,13 @@ usage() {
   printf '%s\n' 'Customer.io mobile SDK end-to-end runner.'
   printf '\nUsage:\n'
   printf '  ./e2e doctor --platform android|ios [--sdk-repo PATH]\n'
-  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|live-activities|live-activities-remote]\n'
+  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
   printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
   printf '\nEnvironment overrides:\n'
   printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
   printf '  MAESTRO_EXT_API_KEY, MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
-  printf '  LIVE_ACTIVITY_APP_IDENTIFIER, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
+  printf '  LIVE_ACTIVITY_APP_IDENTIFIER, LIVE_NOTIFICATION_APP_IDENTIFIER,\n'
+  printf '  LIVE_NOTIFICATION_DEEP_LINK, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to 83 on Android and any post-move fence on iOS)\n'
 }
@@ -74,6 +75,7 @@ if [[ -z "$FLOW" ]]; then
     campaign) FLOW="campaign_141.yaml" ;;
     inline) FLOW="inline_messages.yaml" ;;
     live-activities|live-activities-remote) FLOW="live_activities.yaml" ;;
+    live-notifications|live-notifications-remote) FLOW="live_notifications_android.yaml" ;;
     *) die "unknown suite '$SUITE'" ;;
   esac
 fi
@@ -81,6 +83,9 @@ fi
 FLOW_BASENAME="$(basename "$FLOW")"
 if [[ "$FLOW_BASENAME" == "live_activities.yaml" && "$PLATFORM" != "ios" ]]; then
   die "the live activities flow requires --platform ios"
+fi
+if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" && "$PLATFORM" != "android" ]]; then
+  die "the Android live notifications flow requires --platform android"
 fi
 
 if [[ -z "$SDK_REPO" ]]; then
@@ -118,11 +123,26 @@ case "$SUITE" in
   live-activities-remote) MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=true ;;
   *) : "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}" ;;
 esac
+case "$SUITE" in
+  live-notifications) MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED=false ;;
+  live-notifications-remote) MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED=true ;;
+  *) : "${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:=false}" ;;
+esac
 : "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
 : "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
 : "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
+if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" ]]; then
+  LIVE_NOTIFICATION_PLATFORM="android"
+  : "${LIVE_NOTIFICATION_DEEP_LINK:=}"
+else
+  : "${LIVE_NOTIFICATION_PLATFORM:=ios}"
+  : "${LIVE_NOTIFICATION_DEEP_LINK:=apn-uikit://live-activities}"
+fi
+: "${LIVE_NOTIFICATION_APP_IDENTIFIER:=${LIVE_ACTIVITY_APP_IDENTIFIER:-}}"
 export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL
 export MAESTRO_APP_API_KEY MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED
+export MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED LIVE_NOTIFICATION_PLATFORM
+export LIVE_NOTIFICATION_APP_IDENTIFIER LIVE_NOTIFICATION_DEEP_LINK
 
 FLOW_NAME="$(basename "$FLOW" .yaml)"
 ARTIFACT_DIR="$SDK_REPO/artifacts/e2e/$PLATFORM/$FLOW_NAME"
@@ -177,7 +197,7 @@ validate_backend() {
     "$MAESTRO_EXT_API_BASE_URL/customers?email=maestro-doctor-no-match%40cio.test") || true
   [[ "$status" == "200" ]] || die "Ext API preflight returned HTTP ${status:-unreachable} at $MAESTRO_EXT_API_BASE_URL"
 
-  if [[ "$FLOW_NAME" == "live_activities" ]]; then
+  if [[ "$FLOW_NAME" == "live_activities" || "$FLOW_NAME" == "live_notifications_android" ]]; then
     if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
       die "MAESTRO_APP_API_KEY still contains the placeholder value"
     fi
@@ -402,6 +422,18 @@ prepare_geofence_permissions() {
   fi
 }
 
+prepare_live_notification_permissions() {
+  if [[ "$FLOW" != "live_notifications_android.yaml" ]]; then
+    return 0
+  fi
+  note "resetting Android app data and granting notification permission"
+  adb -s "$ANDROID_SERIAL" shell pm clear "$APP_ID" >/dev/null
+  adb -s "$ANDROID_SERIAL" shell pm grant "$APP_ID" android.permission.POST_NOTIFICATIONS
+  adb -s "$ANDROID_SERIAL" shell dumpsys package "$APP_ID" \
+    | grep -E 'POST_NOTIFICATIONS: granted=' \
+    >"$ARTIFACT_DIR/notification-permissions.log" || true
+}
+
 collect_device_logs() {
   if [[ "$PLATFORM" == "android" ]]; then
     adb -s "$ANDROID_SERIAL" logcat -d \
@@ -428,6 +460,7 @@ run_e2e() {
     runner_platform="iOS"
   fi
   prepare_geofence_permissions
+  prepare_live_notification_permissions
 
   export APP_ID HARNESS_DIR SAMPLE_MAESTRO_DIR
   export E2E_DEVICE_ID="$DEVICE_ID"

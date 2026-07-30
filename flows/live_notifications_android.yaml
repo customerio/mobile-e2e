@@ -1,0 +1,326 @@
+appId: ${APP_ID}
+tags:
+  - live-notifications
+  - push
+  - android
+name: Android Live Notifications — local lifecycle and remote FCM delivery
+---
+# Android counterpart to the iOS Live Activities E2E:
+#
+# local typed SDK API → system notification → Customer.io lifecycle status
+# Customer.io App API → FCM → SDK renderer → in-place system notification
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+# The one-command runner already reset storage and granted POST_NOTIFICATIONS.
+- launchApp:
+    clearState: false
+
+# Give Firebase token initialization a head start before the dashboard reads it.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "8000"
+
+# --- Identify a fresh customer ---
+- assertVisible:
+    id: "login_button"
+- tapOn:
+    id: "first_name_input"
+- inputText: "Maestro Live Notifications Tester"
+- hideKeyboard
+- tapOn:
+    id: "email_input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "login_button"
+
+- extendedWaitUntil:
+    visible:
+      id: "custom_event_button"
+    timeout: 30000
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+# Local lifecycle reports are intentionally skipped if the FCM token is not
+# ready. The dashboard exposes that prerequisite, so fail before starting.
+- assertNotVisible: "Not Registered"
+
+- scrollUntilVisible:
+    element:
+      id: "live_notification_demo_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "live_notification_demo_button"
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+- extendedWaitUntil:
+    visible:
+      id: "status_text_view"
+    timeout: 15000
+
+# --- Local typed SDK start ---
+- scrollUntilVisible:
+    element:
+      id: "api_start_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "api_start_button"
+- scrollUntilVisible:
+    element:
+      id: "status_text_view"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "status_text_view"
+      text: "Status: API:[0-9A-HJKMNP-TV-Z]{26} \\(Step 1\\)"
+    timeout: 15000
+- copyTextFrom:
+    id: "status_text_view"
+- runScript:
+    file: ../scripts/capture_android_live_notification_id.js
+- assertTrue: ${output.capture_live_id_ok === "true"}
+
+- runScript:
+    file: ../scripts/assert_live_notification_status.js
+    env:
+      LIVE_INSTANCE_ID: ${output.live_instance_id}
+      EXPECTED_STATE: "active"
+      EXPECTED_OPERATION: "start"
+      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+      EXPECTED_PLATFORM: "android"
+      EXPECTED_SOURCE: "device"
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.live_status_ok === "true"}
+
+- swipe:
+    start: "50%,1%"
+    end: "50%,90%"
+    duration: 900
+- runFlow:
+    when:
+      notVisible: ".*Out for delivery \\(started via API\\).*"
+    commands:
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+- extendedWaitUntil:
+    visible: ".*Out for delivery \\(started via API\\).*"
+    timeout: 20000
+- takeScreenshot: artifacts/live_notifications_01_local_start_system_surface
+- pressKey: Back
+
+# --- Local in-place update ---
+- scrollUntilVisible:
+    element:
+      id: "api_update_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "api_update_button"
+- scrollUntilVisible:
+    element:
+      id: "status_text_view"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "status_text_view"
+      text: "Status: API:${output.live_instance_id} \\(Step 2\\)"
+    timeout: 15000
+- swipe:
+    start: "50%,1%"
+    end: "50%,90%"
+    duration: 900
+- runFlow:
+    when:
+      notVisible: ".*Arriving now \\(updated via API\\).*"
+    commands:
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+- extendedWaitUntil:
+    visible: ".*Arriving now \\(updated via API\\).*"
+    timeout: 20000
+- assertNotVisible: ".*Out for delivery \\(started via API\\).*"
+- takeScreenshot: artifacts/live_notifications_02_local_update_system_surface
+- pressKey: Back
+
+# --- Local end: backend state ends and final content stays dismissible ---
+- scrollUntilVisible:
+    element:
+      id: "api_end_button"
+    direction: DOWN
+    timeout: 15000
+    centerElement: true
+- tapOn:
+    id: "api_end_button"
+- scrollUntilVisible:
+    element:
+      id: "status_text_view"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "status_text_view"
+      text: "Status: Ended"
+    timeout: 15000
+- runScript:
+    file: ../scripts/assert_live_notification_status.js
+    env:
+      LIVE_INSTANCE_ID: ${output.live_instance_id}
+      EXPECTED_STATE: "ended"
+      EXPECTED_OPERATION: "end"
+      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+      EXPECTED_PLATFORM: "android"
+      EXPECTED_SOURCE: "device"
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.live_status_ok === "true"}
+- swipe:
+    start: "50%,1%"
+    end: "50%,90%"
+    duration: 900
+- runFlow:
+    when:
+      notVisible: ".*Arriving now \\(updated via API\\).*"
+    commands:
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+- extendedWaitUntil:
+    visible: ".*Arriving now \\(updated via API\\).*"
+    timeout: 20000
+- takeScreenshot: artifacts/live_notifications_03_local_end_system_surface
+- pressKey: Back
+
+# --- Optional Customer.io App API → FCM → Android SDK lane ---
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED == "true"}
+    commands:
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "start"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "5000"
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+      - runFlow:
+          when:
+            notVisible: ".*Maestro remote start ${output.run_id_regex}.*"
+          commands:
+            - waitForAnimationToEnd:
+                timeout: 1000
+            - swipe:
+                start: "50%,1%"
+                end: "50%,90%"
+                duration: 900
+      - extendedWaitUntil:
+          visible: ".*Maestro remote start ${output.run_id_regex}.*"
+          timeout: 30000
+      - assertVisible: ".*Customer.io backend to FCM.*"
+      - takeScreenshot: artifacts/live_notifications_04_remote_start_system_surface
+      - pressKey: Back
+
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "update"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "5000"
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+      - runFlow:
+          when:
+            notVisible: ".*Maestro remote update ${output.run_id_regex}.*"
+          commands:
+            - waitForAnimationToEnd:
+                timeout: 1000
+            - swipe:
+                start: "50%,1%"
+                end: "50%,90%"
+                duration: 900
+      - extendedWaitUntil:
+          visible: ".*Maestro remote update ${output.run_id_regex}.*"
+          timeout: 30000
+      - assertNotVisible: ".*Maestro remote start ${output.run_id_regex}.*"
+      - takeScreenshot: artifacts/live_notifications_05_remote_update_system_surface
+      - pressKey: Back
+
+      - runScript:
+          file: ../scripts/live_notification_request.js
+          env:
+            LIVE_NOTIFICATION_ACTION: "end"
+            RUN_EMAIL: ${output.email}
+            RUN_ID: ${output.run_id}
+            MAX_WAIT_MS: "120000"
+      - assertTrue: ${output.live_request_ok === "true"}
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "5000"
+      - swipe:
+          start: "50%,1%"
+          end: "50%,90%"
+          duration: 900
+      - runFlow:
+          when:
+            notVisible: ".*Maestro remote end ${output.run_id_regex}.*"
+          commands:
+            - waitForAnimationToEnd:
+                timeout: 1000
+            - swipe:
+                start: "50%,1%"
+                end: "50%,90%"
+                duration: 900
+      - extendedWaitUntil:
+          visible: ".*Maestro remote end ${output.run_id_regex}.*"
+          timeout: 30000
+      - assertNotVisible: ".*Maestro remote update ${output.run_id_regex}.*"
+      - takeScreenshot: artifacts/live_notifications_06_remote_end_system_surface
