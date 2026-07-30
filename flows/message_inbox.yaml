@@ -1,7 +1,7 @@
 appId: ${APP_ID}
 tags:
   - message-inbox
-name: Message Inbox — backend, SDK data API, visual overlay, actions
+name: Message Inbox — backend, SDK data API, visual presentations, actions
 ---
 # Shared iOS/Android Inbox flow. INBOX_TRANSACTIONAL_MESSAGE_ID must reference
 # an active visual Inbox template (cio_inbox* topic and basic/image/cta type).
@@ -299,37 +299,38 @@ name: Message Inbox — backend, SDK data API, visual overlay, actions
 - assertTrue: ${output.assert_ok === "true"}
 - assertTrue: ${output.inbox_visual_renderable === "true"}
 
-# Reach the drop-in SDK overlay mounted by each sample application.
+# First show the SDK's visual list in a dedicated full-screen host — the
+# message-center experience customers can put behind a tab or navigation item.
 - runFlow:
     when:
       platform: Android
     commands:
       - back
-      - extendedWaitUntil:
-          visible: "Notifications inbox"
-          timeout: 15000
-      - tapOn: "Notifications inbox"
+      - scrollUntilVisible:
+          element:
+            id: "visual_inbox_button"
+          direction: DOWN
+          timeout: 10000
+      - tapOn:
+          id: "visual_inbox_button"
+      - assertVisible: "Visual Inbox"
 - runFlow:
     when:
       platform: iOS
     commands:
-      - tapOn: "Overlay"
-      - assertVisible: "Your App Content"
-      - extendedWaitUntil:
-          visible: ".*Notifications.*"
-          timeout: 15000
-      - tapOn: ".*Notifications.*"
+      - tapOn: "Visual"
+      - assertVisible: "Visual Inbox"
 
 # The title/body are read from the production queue and then required in the
-# SDK-rendered UI. The CTA label is the published fixture contract.
+# full-screen SDK-rendered list. The CTA label is the published fixture contract.
 - extendedWaitUntil:
     visible: ".*${output.inbox_title_regex}.*"
     timeout: 15000
 - assertVisible: ".*${output.inbox_body_regex}.*"
 - assertVisible: "Verify E2E"
-- takeScreenshot: artifacts/inbox_04_visual_rendered
+- takeScreenshot: artifacts/inbox_04_visual_full_screen
 
-# Presenting the visual inbox marks the exact delivery opened.
+# Presenting the visual list marks the exact delivery opened.
 - runScript:
     file: ../scripts/assert_inbox_queue_state.js
     env:
@@ -349,6 +350,48 @@ name: Message Inbox — backend, SDK data API, visual overlay, actions
       MAX_WAIT_MS: "90000"
 - assertTrue: ${output.assert_ok === "true"}
 
+# Return to the host and open the convenience bell + bottom-sheet overlay with
+# the same still-present delivery. This makes the two supported presentations
+# directly comparable in one recording. iOS has no device-level Back action,
+# so address the navigation controller's back button explicitly.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - back
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          id: "BackButton"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Notifications inbox"
+          timeout: 15000
+      - tapOn: "Notifications inbox"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Overlay"
+      - assertVisible: "Your App Content"
+      - extendedWaitUntil:
+          visible: ".*Notifications.*"
+          timeout: 15000
+      - tapOn: ".*Notifications.*"
+
+# The same server-rendered row must also appear in the overlay.
+- extendedWaitUntil:
+    visible: ".*${output.inbox_title_regex}.*"
+    timeout: 15000
+- assertVisible: ".*${output.inbox_body_regex}.*"
+- assertVisible: "Verify E2E"
+- takeScreenshot: artifacts/inbox_05_visual_overlay
+
 # This fixture's CTA is a real Jist dismiss action. Tap it visually and prove
 # the same exact delivery is removed from the backend queue.
 - tapOn: "Verify E2E"
@@ -360,4 +403,4 @@ name: Message Inbox — backend, SDK data API, visual overlay, actions
       EXPECT_PRESENT: "false"
       MAX_WAIT_MS: "30000"
 - assertTrue: ${output.assert_ok === "true"}
-- takeScreenshot: artifacts/inbox_05_visual_dismissed
+- takeScreenshot: artifacts/inbox_06_visual_dismissed

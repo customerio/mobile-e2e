@@ -108,7 +108,7 @@ flows/
   inline_messages.yaml         # Template for inline in-app validation (needs a
                                # seeded workspace campaign to fully assert).
   message_inbox.yaml           # App API → Gist queue → native SDK data API and
-                               # Customer.io visual overlay → backend state.
+                               # full-screen/overlay visual Inbox → backend state.
   live_activities.yaml         # iOS local ActivityKit lifecycle plus optional
                                # real backend/APNs start, update, and end.
 scripts/
@@ -216,11 +216,13 @@ screenshots, raw video, device logs, and backend sink evidence still work.
 
 The Message Inbox suite covers both surfaces. Its first delivery exercises the
 SDK's build-your-own/data API (render, read, unread, click, and delete). After
-that delivery is deleted, a second delivery opens the drop-in visual overlay,
-asserts the server-provided title/body and the fixture CTA, proves the opened
-metric, taps the real Jist dismiss action, and proves queue removal. The template
-must contain a `cio_inbox*` topic and `type` equal to `basic`, `image`, or `cta`;
-the pre-render queue assertion fails explicitly when the fixture is incompatible.
+that delivery is deleted, a second delivery first renders in a dedicated
+full-screen `NotificationInboxView` and then renders again through the optional
+bell/bottom-sheet overlay. Both presentations assert the same server-provided
+title/body and fixture CTA. The flow also proves the opened metric, taps the real
+Jist dismiss action, and proves queue removal. The template must contain a
+`cio_inbox*` topic and `type` equal to `basic`, `image`, or `cta`; the pre-render
+queue assertion fails explicitly when the fixture is incompatible.
 
 ## CI
 
