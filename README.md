@@ -29,6 +29,8 @@ From this repository:
 ./e2e run --platform ios --suite smoke
 ./e2e run --platform android --suite geofence
 ./e2e run --platform ios --suite geofence
+INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform android --suite message-inbox
+INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform ios --suite message-inbox
 ./e2e run --platform ios --suite live-activities
 ```
 
@@ -105,6 +107,8 @@ flows/
                                # fences → inside location → backend geofence activity.
   inline_messages.yaml         # Template for inline in-app validation (needs a
                                # seeded workspace campaign to fully assert).
+  message_inbox.yaml           # App API → Gist queue → native SDK data API and
+                               # Customer.io visual overlay → backend state.
   live_activities.yaml         # iOS local ActivityKit lifecycle plus optional
                                # real backend/APNs start, update, and end.
 scripts/
@@ -116,6 +120,11 @@ scripts/
   assert_message_delivered.js  # Maestro runScript helper: polls Customer.io Ext API
                                # for a message of a given type/metric/campaign and
                                # POSTs the match (or miss) to the sink.
+  assert_inbox_queue_state.js  # Polls the Gist queue for this run's exact inbox
+                               # message, verifies read/unread/deleted state, and
+                               # reports whether it is eligible for the visual overlay.
+  send_inbox_message.js        # Sends a transactional Inbox template to the
+                               # SDK-identified synthetic profile.
   assert_customer_activity.js  # Polls Ext API activities for an exact event/property
                                # or first-class geofence activity after a timestamp.
   capture_live_activity_id.js  # Extracts the SDK-minted id from the app's
@@ -155,6 +164,7 @@ shared flows drive. Current identifier set:
 | `login_button`, `first_name_input`, `email_input` | Identify a fresh test customer |
 | `custom_event_button`, `event_name_input`, `property_name_input`, `property_value_input`, `send_event_button` | Send a uniquely traceable event |
 | `location_test_button`, `request_sdk_location_once` | Drive the SDK location/geofence path |
+| `inbox_messages_button`, `mark_read_button`, `mark_unread_button`, `track_click_button`, `delete_button` | Open the raw inbox and drive message state/actions |
 | `live_activities_button`, `live_activity_segments_toggle`, `live_activity_segments_update`, `live_activity_system_status`, `live_activity_end_all` | Drive, observe, and reset ActivityKit state |
 
 iOS exposes these through `accessibilityIdentifier`; the Android Java sample
@@ -196,17 +206,27 @@ is already installed on a booted device.
 - `ffmpeg` on PATH (video assembly + annotated composite)
 - `maestro` CLI
 - Bearer token for Customer.io Ext API in `MAESTRO_EXT_API_KEY`
+- Published transactional Inbox template with non-empty `properties.title` and
+  `properties.body`; pass its ID as `INBOX_TRANSACTIONAL_MESSAGE_ID`
 - Live Notifications entitlement and APNs sandbox setup for the remote lane
 
 `./e2e doctor --platform <platform>` reports missing prerequisites before any
 build starts. A missing Pillow installation is a warning: Maestro, JUnit/HTML,
 screenshots, raw video, device logs, and backend sink evidence still work.
 
+The Message Inbox suite covers both surfaces. Its first delivery exercises the
+SDK's build-your-own/data API (render, read, unread, click, and delete). After
+that delivery is deleted, a second delivery opens the drop-in visual overlay,
+asserts the server-provided title/body and the fixture CTA, proves the opened
+metric, taps the real Jist dismiss action, and proves queue removal. The template
+must contain a `cio_inbox*` topic and `type` equal to `basic`, `image`, or `cta`;
+the pre-render queue assertion fails explicitly when the fixture is incompatible.
+
 ## CI
 
 Both native SDK repos contain a `Maestro SDK E2E` workflow. It runs smoke
-on weekdays. iOS additionally offers manual `live-activities` and
-`live-activities-remote` dispatches. Each job
+on weekdays and offers `message-inbox` as a manual dispatch. iOS additionally
+offers manual `live-activities` and `live-activities-remote` dispatches. Each job
 checks out this harness, provisions a virtual device,
 builds the SDK sample from source, runs the same command used locally, and
 uploads `artifacts/e2e/` even on failure.
@@ -221,6 +241,8 @@ Required repository secrets:
 - Existing sample CDP/site secrets (`CUSTOMERIO_JAVA_WORKSPACE_*` on Android,
   `CUSTOMERIO_APN_WORKSPACE_*` on iOS).
 - `MOBILE_E2E_EXT_API_KEY` for backend assertions.
+- `MOBILE_E2E_INBOX_TRANSACTIONAL_MESSAGE_ID` repository variable containing a
+  published Inbox template ID for the manual `message-inbox` suite.
 - `MOBILE_E2E_REPO_TOKEN` only when the workflow's default token cannot read the
   shared `customerio/mobile-e2e` repository.
 

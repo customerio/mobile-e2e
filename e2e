@@ -23,13 +23,15 @@ usage() {
   printf '%s\n' 'Customer.io mobile SDK end-to-end runner.'
   printf '\nUsage:\n'
   printf '  ./e2e doctor --platform android|ios [--sdk-repo PATH]\n'
-  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
+  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|message-inbox|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
   printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
   printf '\nEnvironment overrides:\n'
   printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
   printf '  MAESTRO_EXT_API_KEY, MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
   printf '  LIVE_ACTIVITY_APP_IDENTIFIER, LIVE_NOTIFICATION_APP_IDENTIFIER,\n'
-  printf '  LIVE_NOTIFICATION_DEEP_LINK, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
+  printf '  LIVE_NOTIFICATION_DEEP_LINK, MAESTRO_INBOX_API_BASE_URL, MAESTRO_SITE_ID,\n'
+  printf '  MAESTRO_INBOX_DATACENTER, MAESTRO_INBOX_CLIENT_PLATFORM,\n'
+  printf '  INBOX_TRANSACTIONAL_MESSAGE_ID, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to 83 on Android and any post-move fence on iOS)\n'
 }
@@ -74,6 +76,7 @@ if [[ -z "$FLOW" ]]; then
     geofence) FLOW="geofence_basic.yaml" ;;
     campaign) FLOW="campaign_141.yaml" ;;
     inline) FLOW="inline_messages.yaml" ;;
+    message-inbox|inbox) FLOW="message_inbox.yaml" ;;
     live-activities|live-activities-remote) FLOW="live_activities.yaml" ;;
     live-notifications|live-notifications-remote) FLOW="live_notifications_android.yaml" ;;
     *) die "unknown suite '$SUITE'" ;;
@@ -112,11 +115,16 @@ else
 fi
 
 ENV_FILE="$SAMPLE_MAESTRO_DIR/.env"
+CALLER_INBOX_MESSAGE_ID_SET="${INBOX_TRANSACTIONAL_MESSAGE_ID+x}"
+CALLER_INBOX_MESSAGE_ID="${INBOX_TRANSACTIONAL_MESSAGE_ID:-}"
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
+fi
+if [[ "$CALLER_INBOX_MESSAGE_ID_SET" == "x" ]]; then
+  INBOX_TRANSACTIONAL_MESSAGE_ID="$CALLER_INBOX_MESSAGE_ID"
 fi
 case "$SUITE" in
   live-activities) MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=false ;;
@@ -143,6 +151,33 @@ export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL
 export MAESTRO_APP_API_KEY MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED
 export MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED LIVE_NOTIFICATION_PLATFORM
 export LIVE_NOTIFICATION_APP_IDENTIFIER LIVE_NOTIFICATION_DEEP_LINK
+
+resolve_sample_site_id() {
+  if [[ "$PLATFORM" == "android" ]]; then
+    sed -nE \
+      's/^[[:space:]]*(javaLayout_)?siteId[[:space:]]*=[[:space:]]*([^[:space:]#]+).*/\2/p' \
+      "$CONFIG_FILE" | head -1
+  else
+    sed -nE 's/.*siteId[^=]*=[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_FILE" | head -1
+  fi
+}
+
+if [[ "$FLOW_BASENAME" == "message_inbox.yaml" ]]; then
+  : "${MAESTRO_SITE_ID:=$(resolve_sample_site_id)}"
+  [[ -n "$MAESTRO_SITE_ID" ]] || die "could not resolve the sample siteId for Message Inbox assertions"
+  : "${MAESTRO_INBOX_API_BASE_URL:=https://consumer.inapp.customer.io}"
+  : "${MAESTRO_INBOX_DATACENTER:=US}"
+  if [[ "$PLATFORM" == "android" ]]; then
+    : "${MAESTRO_INBOX_CLIENT_PLATFORM:=android-android}"
+  else
+    : "${MAESTRO_INBOX_CLIENT_PLATFORM:=ios-apple}"
+  fi
+  : "${INBOX_TRANSACTIONAL_MESSAGE_ID:=}"
+  [[ -n "$INBOX_TRANSACTIONAL_MESSAGE_ID" ]] \
+    || die "INBOX_TRANSACTIONAL_MESSAGE_ID is required for the Message Inbox suite"
+  export MAESTRO_SITE_ID MAESTRO_INBOX_API_BASE_URL MAESTRO_INBOX_DATACENTER MAESTRO_INBOX_CLIENT_PLATFORM
+  export INBOX_TRANSACTIONAL_MESSAGE_ID
+fi
 
 FLOW_NAME="$(basename "$FLOW" .yaml)"
 ARTIFACT_DIR="$SDK_REPO/artifacts/e2e/$PLATFORM/$FLOW_NAME"

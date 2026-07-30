@@ -10,6 +10,7 @@
 //   MIN_METRIC           - "sent" (default) | "delivered" | "drafted" | "opened" | ...
 //   MAX_WAIT_MS          - "20000" ms total budget
 //   POLL_INTERVAL_MS     - "750" ms between attempts (busy-wait; no Thread.sleep available)
+//   EXPECTED_MESSAGE_ID  - exact delivery/message id returned by a send API
 //
 // Always sets:
 //   output.assert_ok      - "true" | "false"
@@ -42,6 +43,7 @@
         : "http://127.0.0.1:8899"
     var SINK = SINK_BASE + "/assert"
     var CAMP = (typeof CAMPAIGN_ID === "string") ? CAMPAIGN_ID : ""
+    var MESSAGE_ID = (typeof EXPECTED_MESSAGE_ID === "string") ? EXPECTED_MESSAGE_ID : ""
 
     output.assert_ok = "false"
     output.assert_reason = ""
@@ -52,6 +54,7 @@
             payload.expected_type = TYPE
             payload.min_metric = MIN
             payload.campaign_filter = CAMP
+            payload.message_id_filter = MESSAGE_ID
             payload.run_email = RUN_EMAIL
             http.post(SINK, { body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } })
         } catch (_) { /* sink not running; non-fatal */ }
@@ -105,7 +108,9 @@
                     var m = messages[i]
                     var metrics = m.metrics || {}
                     if (i < 10) seen.push({ type: m.type, campaign_id: m.campaign_id, metrics: Object.keys(metrics) })
-                    if (m.type === TYPE && metrics[MIN] && (!CAMP || String(m.campaign_id) === CAMP)) {
+                    if (m.type === TYPE && metrics[MIN] &&
+                        (!CAMP || String(m.campaign_id) === CAMP) &&
+                        (!MESSAGE_ID || String(m.id) === MESSAGE_ID)) {
                         output.assert_ok = "true"
                         output.assert_reason = "matched_after_" + attempts + "_attempts"
                         output.message_id = m.id

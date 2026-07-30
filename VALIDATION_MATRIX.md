@@ -45,6 +45,11 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Android geofence transition reached backend | grant foreground/background permission, register fences, move inside City Hall Park, then assert `type=geofence` and `geofence_id=83` after movement |
 | iOS geofence transition reached backend | grant Always permission, register monitored conditions, move the simulator, then assert a first-class `type=geofence` activity after movement; set `GEOFENCE_ID` for exact workspace seeding |
 | Android geofence foreground recovery | background/foreground the sample after initial registration and validate the production foreground-retry path before movement |
+| Inbox delivery reaches the SDK queue | Identify a fresh profile through the SDK, send a published transactional Inbox template through the App API, require the exact returned delivery ID in Ext API history with `type=inbox` and `metrics.sent`, then match that delivery in the Gist queue with `opened=false` |
+| Inbox SDK list and opened metric | Fetch the exact delivery through the public SDK inbox API, assert its title/body in the native sample UI, mark it read, then require both Gist `opened=true` and the exact Ext API `opened` metric |
+| Inbox read/unread state | Drive the public SDK read controls and poll the Gist queue after each mutation for `opened=true`, `opened=false`, then `opened=true` |
+| Inbox click and delete | Call the public click API and require the Ext API `clicked` metric; delete through the SDK and require three consecutive Gist polls with the run marker absent plus the native empty state |
+| Inbox visual rendering and CTA | Send a second isolated delivery, require a visual-compatible server payload, open the SDK's real bell/sheet, match the queue title/body in rendered Jist UI plus the published CTA label, require the exact delivery's opened metric, tap its dismiss action, then require stable queue absence |
 | iOS local Live Activity visual lifecycle | Drive the registered Segments, Delivery, and Countdown examples through start/update/end; require one stable ActivityKit and Customer.io instance per template; assert active/final Lock Screen content; tap the card and verify widget-URL re-entry to the Live Activities screen; save each state as evidence |
 | iOS local Live Activity lifecycle reached backend | Copy the SDK-minted `cioInstanceId` from ActivityKit, poll `/v1/live_notifications/:id`, require device-sourced start/end on that same conversation, and hold the backend at its original start delivery for 8 seconds after a local-only update |
 
@@ -151,8 +156,13 @@ If we later land dedicated test campaigns in the test-prod workspace:
 - `maestro_inline_dashboard` — event-triggered by `maestro_inline`, page rule: only Dashboard screen, inline targeting `elementId = "inline"`, body `"MAESTRO INLINE DASHBOARD"`.
 - `maestro_inline_inbox_only` — same but page rule = Inbox screen, body `"MAESTRO INLINE INBOX"`.
 - `maestro_push_generic` — event-triggered by `maestro_push`, push with title+body that includes `{{event.properties.run_id}}` so each test run has a uniquely traceable push.
+- `maestro_visual_inbox_e2e` — active transactional Inbox template with a
+  `cio_inbox*` topic, `cta` type, title `MAESTRO VISUAL INBOX`, body
+  `Rendered by Customer.io for Maestro E2E.`, and dismiss CTA `Verify E2E`.
+  Set message ID `21` through `INBOX_TRANSACTIONAL_MESSAGE_ID`. The harness
+  sends only to the fresh synthetic profile identified by that run.
 
-With these four seeded, every row in the "Coverable with small additions" section above becomes a working flow.
+With these seeded, every row in the "Coverable with small additions" section above becomes a working flow.
 
 ## One-command execution and artifacts
 
@@ -161,6 +171,8 @@ With these four seeded, every row in the "Coverable with small additions" sectio
 ./e2e run --platform ios --suite smoke
 ./e2e run --platform android --suite geofence
 ./e2e run --platform ios --suite geofence
+INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform android --suite message-inbox
+INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform ios --suite message-inbox
 ./e2e run --platform ios --suite live-activities
 ./e2e run --platform ios --suite live-activities-remote
 ```

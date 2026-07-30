@@ -1,0 +1,363 @@
+appId: ${APP_ID}
+tags:
+  - message-inbox
+name: Message Inbox — backend, SDK data API, visual overlay, actions
+---
+# Shared iOS/Android Inbox flow. INBOX_TRANSACTIONAL_MESSAGE_ID must reference
+# an active visual Inbox template (cio_inbox* topic and basic/image/cta type).
+
+- runScript:
+    file: ../scripts/setup_run.js
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      # The one-command runner already uninstalls and reinstalls the iOS app.
+      # Asking Maestro to reinstall it a second time can leave SpringBoard in
+      # front during a CoreSimulator race instead of launching the sample.
+      - launchApp:
+          clearState: false
+
+# --- Identify a fresh customer ---
+- assertVisible:
+    id: "login_button"
+- tapOn:
+    id: "first_name_input"
+- inputText: "Maestro Inbox Tester"
+- hideKeyboard
+- tapOn:
+    id: "email_input"
+- inputText: ${output.email}
+- hideKeyboard
+- tapOn:
+    id: "login_button"
+
+- tapOn:
+    text: "Continue"
+    optional: true
+
+# --- Send a run-correlated transactional Inbox delivery ---
+- runScript:
+    file: ../scripts/send_inbox_message.js
+    env:
+      RUN_EMAIL: ${output.email}
+      RUN_ID: ${output.run_id}
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.inbox_send_ok === "true"}
+
+# The exact App API delivery must reach Customer.io's message history.
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "inbox"
+      MIN_METRIC: "sent"
+      EXPECTED_MESSAGE_ID: ${output.inbox_delivery_id}
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# The same exact delivery must be retrievable from the SDK's Gist queue, with
+# title/body fields that the sample apps can display.
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "false"
+      REQUIRE_TITLE_BODY: "true"
+      REQUIRE_VISUAL_RENDERABLE: "true"
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# Identification can trigger an unrelated welcome in-app message after the
+# first, immediate dismissal check. Clear it again before navigating so it
+# cannot intercept the dashboard scroll/tap.
+- tapOn:
+    text: "Continue"
+    optional: true
+
+# Open each sample's raw SDK inbox screen. This exercises the public inbox API
+# independently of the separately-configured Customer.io-rendered overlay.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: "inbox_messages_button"
+          direction: DOWN
+          timeout: 10000
+      - tapOn:
+          id: "inbox_messages_button"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      # XCUITest reports the clipped button's full frame just below the
+      # dashboard scroll viewport, so scrollUntilVisible can false-positive.
+      # Move the scroll view explicitly before tapping the stable button id.
+      - swipe:
+          start: 50%, 70%
+          end: 50%, 35%
+          duration: 600
+      - tapOn:
+          id: "inbox_messages_button"
+          point: "10%,50%"
+          retryTapIfNoChange: true
+
+# The welcome campaign can finish loading during the dashboard-to-inbox
+# transition. Dismiss that last possible arrival before asserting/using the
+# inbox controls; it is unrelated to this transactional Inbox delivery.
+- tapOn:
+    text: "Continue"
+    optional: true
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - assertVisible: "Inbox Messages"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - assertVisible:
+          id: "inbox_messages_list"
+- extendedWaitUntil:
+    visible: ".*${output.inbox_title_regex}.*"
+    timeout: 15000
+- assertVisible: ".*${output.inbox_body_regex}.*"
+- takeScreenshot: artifacts/inbox_01_unread_sdk_message
+
+# Mark the unread message read and prove both the queue state and Customer.io
+# opened metric changed for the exact delivery.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    id: "mark_read_button"
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "true"
+      MAX_WAIT_MS: "20000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "inbox"
+      MIN_METRIC: "opened"
+      EXPECTED_MESSAGE_ID: ${output.inbox_delivery_id}
+      # Queue mutation is immediate, but Ext API message-history projection can
+      # lag by more than 30 seconds under load.
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# Toggle it unread and then read again, validating the server state after each
+# public SDK call.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    id: "mark_unread_button"
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "false"
+      MAX_WAIT_MS: "20000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    id: "mark_read_button"
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "true"
+      MAX_WAIT_MS: "20000"
+- assertTrue: ${output.assert_ok === "true"}
+- takeScreenshot: artifacts/inbox_02_read_sdk_message
+
+# Public click API -> backend clicked metric.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    id: "track_click_button"
+- assertVisible: ".*Track.*Click.*"
+- tapOn: "Action name"
+- inputText: "maestro_inbox_action"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+      - tapOn: "^OK$"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "^Track$"
+
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "inbox"
+      MIN_METRIC: "clicked"
+      EXPECTED_MESSAGE_ID: ${output.inbox_delivery_id}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# Delete through the SDK, then prove both local UI removal and stable absence
+# from the backing Gist queue.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    id: "delete_button"
+- assertVisible: "Delete Message"
+- tapOn: "Delete"
+
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "false"
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "No inbox messages"
+          timeout: 10000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: ".*Your inbox is empty.*"
+          timeout: 10000
+- takeScreenshot: artifacts/inbox_03_deleted
+
+# --- Customer.io-rendered visual Inbox ---
+# Use a second delivery after deleting the data-API fixture so the visual CTA's
+# dismiss action cannot interfere with the read/unread/click/delete coverage.
+- runScript:
+    file: ../scripts/send_inbox_message.js
+    env:
+      RUN_EMAIL: ${output.email}
+      RUN_ID: ${output.run_id}
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.inbox_send_ok === "true"}
+
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "inbox"
+      MIN_METRIC: "sent"
+      EXPECTED_MESSAGE_ID: ${output.inbox_delivery_id}
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "false"
+      REQUIRE_TITLE_BODY: "true"
+      REQUIRE_VISUAL_RENDERABLE: "true"
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+- assertTrue: ${output.inbox_visual_renderable === "true"}
+
+# Reach the drop-in SDK overlay mounted by each sample application.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - back
+      - extendedWaitUntil:
+          visible: "Notifications inbox"
+          timeout: 15000
+      - tapOn: "Notifications inbox"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Overlay"
+      - assertVisible: "Your App Content"
+      - extendedWaitUntil:
+          visible: ".*Notifications.*"
+          timeout: 15000
+      - tapOn: ".*Notifications.*"
+
+# The title/body are read from the production queue and then required in the
+# SDK-rendered UI. The CTA label is the published fixture contract.
+- extendedWaitUntil:
+    visible: ".*${output.inbox_title_regex}.*"
+    timeout: 15000
+- assertVisible: ".*${output.inbox_body_regex}.*"
+- assertVisible: "Verify E2E"
+- takeScreenshot: artifacts/inbox_04_visual_rendered
+
+# Presenting the visual inbox marks the exact delivery opened.
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "true"
+      EXPECTED_OPENED: "true"
+      MAX_WAIT_MS: "20000"
+- assertTrue: ${output.assert_ok === "true"}
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "inbox"
+      MIN_METRIC: "opened"
+      EXPECTED_MESSAGE_ID: ${output.inbox_delivery_id}
+      MAX_WAIT_MS: "90000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# This fixture's CTA is a real Jist dismiss action. Tap it visually and prove
+# the same exact delivery is removed from the backend queue.
+- tapOn: "Verify E2E"
+- runScript:
+    file: ../scripts/assert_inbox_queue_state.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_DELIVERY_ID: ${output.inbox_delivery_id}
+      EXPECT_PRESENT: "false"
+      MAX_WAIT_MS: "30000"
+- assertTrue: ${output.assert_ok === "true"}
+- takeScreenshot: artifacts/inbox_05_visual_dismissed

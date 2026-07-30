@@ -28,12 +28,17 @@ mkdir -p "$OUT_DIR" "$DEBUG_DIR"
 find "$DEBUG_DIR" -mindepth 1 -delete
 mkdir -p "$TEST_OUTPUT_DIR"
 find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
+# Never leave a previous run's video looking like evidence for the current run
+# when capture or annotated rendering fails partway through.
+rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
 
 # --- Env
 CALLER_REMOTE_FLAG_SET="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED+x}"
 CALLER_REMOTE_FLAG="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:-}"
 CALLER_NOTIFICATION_REMOTE_FLAG_SET="${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED+x}"
 CALLER_NOTIFICATION_REMOTE_FLAG="${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:-}"
+CALLER_INBOX_MESSAGE_ID_SET="${INBOX_TRANSACTIONAL_MESSAGE_ID+x}"
+CALLER_INBOX_MESSAGE_ID="${INBOX_TRANSACTIONAL_MESSAGE_ID:-}"
 if [[ -f "$SAMPLE_MAESTRO_DIR/.env" ]]; then
   set -a; source "$SAMPLE_MAESTRO_DIR/.env"; set +a
 fi
@@ -43,6 +48,9 @@ fi
 if [[ "$CALLER_NOTIFICATION_REMOTE_FLAG_SET" == "x" ]]; then
   MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED="$CALLER_NOTIFICATION_REMOTE_FLAG"
 fi
+if [[ "$CALLER_INBOX_MESSAGE_ID_SET" == "x" ]]; then
+  INBOX_TRANSACTIONAL_MESSAGE_ID="$CALLER_INBOX_MESSAGE_ID"
+fi
 if [[ -z "${MAESTRO_EXT_API_KEY:-}" ]]; then
   echo "warn: MAESTRO_EXT_API_KEY not set; backend assertions will fail auth" >&2
 fi
@@ -51,6 +59,11 @@ fi
 : "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
 : "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}"
 : "${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:=false}"
+: "${MAESTRO_INBOX_API_BASE_URL:=https://consumer.inapp.customer.io}"
+: "${MAESTRO_INBOX_DATACENTER:=US}"
+: "${MAESTRO_INBOX_CLIENT_PLATFORM:=customerio-maestro}"
+: "${MAESTRO_SITE_ID:=}"
+: "${INBOX_TRANSACTIONAL_MESSAGE_ID:=}"
 : "${LIVE_NOTIFICATION_PLATFORM:=ios}"
 : "${LIVE_NOTIFICATION_APP_IDENTIFIER:=${LIVE_ACTIVITY_APP_IDENTIFIER:-}}"
 if [[ "$LIVE_NOTIFICATION_PLATFORM" == "ios" ]]; then
@@ -233,6 +246,11 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   -e "LIVE_NOTIFICATION_PLATFORM=$LIVE_NOTIFICATION_PLATFORM" \
   -e "LIVE_NOTIFICATION_APP_IDENTIFIER=$LIVE_NOTIFICATION_APP_IDENTIFIER" \
   -e "LIVE_NOTIFICATION_DEEP_LINK=$LIVE_NOTIFICATION_DEEP_LINK" \
+  -e "MAESTRO_INBOX_API_BASE_URL=$MAESTRO_INBOX_API_BASE_URL" \
+  -e "MAESTRO_INBOX_DATACENTER=$MAESTRO_INBOX_DATACENTER" \
+  -e "MAESTRO_INBOX_CLIENT_PLATFORM=$MAESTRO_INBOX_CLIENT_PLATFORM" \
+  -e "MAESTRO_SITE_ID=$MAESTRO_SITE_ID" \
+  -e "INBOX_TRANSACTIONAL_MESSAGE_ID=$INBOX_TRANSACTIONAL_MESSAGE_ID" \
   -e "E2E_SINK_BASE_URL=$E2E_SINK_BASE_URL" \
   -e "E2E_RUN_ID=${E2E_RUN_ID:-}" \
   -e "GEOFENCE_OUTSIDE_LATITUDE=${GEOFENCE_OUTSIDE_LATITUDE:-40.7000}" \
@@ -280,9 +298,16 @@ if [[ "$PLATFORM" == Android ]]; then
 else
   kill "$REC_PID" >/dev/null 2>&1 || true
   wait "$REC_PID" 2>/dev/null || true
+  REC_ENDED_AT_MS=$(python3 -c "import time;print(int(time.time()*1000))")
   FRAME_COUNT=$(ls "$FRAMES_DIR" 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$FRAME_COUNT" -gt 0 ]]; then
-    ffmpeg -y -framerate 5 -i "$FRAMES_DIR/f_%06d.png" \
+    # simctl screenshot latency varies with host load; encoding at the target
+    # loop rate compresses the recording and drifts from Maestro timestamps.
+    # Use the observed average rate so the annotated step panel stays aligned.
+    FRAME_RATE=$(python3 -c \
+      'import sys; frames=int(sys.argv[1]); elapsed=max(0.001, (int(sys.argv[3])-int(sys.argv[2]))/1000); print(f"{frames/elapsed:.6f}")' \
+      "$FRAME_COUNT" "$REC_STARTED_AT_MS" "$REC_ENDED_AT_MS")
+    ffmpeg -y -framerate "$FRAME_RATE" -i "$FRAMES_DIR/f_%06d.png" \
       -vf "scale=-2:1280:flags=lanczos,format=yuv420p" \
       -c:v libx264 -preset veryfast -crf 22 "$OUT_DIR/device.mp4" \
       >/dev/null 2>&1 || echo "warn: frame assembly failed"
@@ -312,6 +337,7 @@ if [[ -f "$OUT_DIR/device.mp4" ]]; then
     --device "$OUT_DIR/device.mp4" \
     --rec-started-ms "$REC_STARTED_AT_MS" \
     --sink "$SINK_LOG" \
+    --title "$FLOW_NAME" \
     --out "$OUT_DIR/annotated.mp4" \
     || echo "warn: annotated video render failed"
 fi
