@@ -60,6 +60,12 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
 | Remote Live Activity system surface | Background the app after remote updates and capture the Simulator system presentation | Dynamic Island-capable Simulator model |
 
+The remote iOS lane also validates the final outcome of device registration: a
+successful push-to-start for a fresh SDK-identified profile proves that services
+can resolve the registered token under the sample's `app_identifier`. It does
+not deterministically force the historical registration-before-`add_device`
+ordering because APNs decides when the Simulator supplies a token.
+
 ### 🛠 Coverable with small additions (patterns exist, need either seeded campaigns or small sample-app work)
 
 | Case | How (pattern) | What's needed |
@@ -71,7 +77,6 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | **Push received tracked** | After campaign fires, `openNotifications` on Android or assert the iOS system surface, then poll for `metrics.delivered` | Real device, Android emulator with Google Play Services, or a supported iOS Simulator with valid APNs sandbox configuration |
 | **Push tap → deep link** | After `openNotifications` + `tapOn`, assert the expected in-app screen is shown | Real device + a campaign with a push containing a deep link |
 | **Profile attribute update visible on server** | tap `Set Profile Attribute` → fill name/value → `runScript` poll `/v1/customers/:cio_id/attributes` | Nothing extra — sample and Ext API both support this today |
-| **Device token registered for customer** | after login, `runScript` on `/v1/customers/:cio_id` looking for `devices[]` entry | Real device OR an emulator with Google Play Services + FCM |
 | **Logout clears identity** | `tapOn: "Logout"` → `assertVisible: "Login"` → `runScript` confirm no new events for the cio_id | Sample must render the Logout button (Android does; iOS's current dashboard hides it) |
 | **Re-identify same email stitches history** | Log in with pre-existing email → `runScript` assert same cio_id returned from lookup → no duplicate customer | Nothing extra |
 
@@ -81,9 +86,26 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 |---|---|
 | Android Live Notification start/update/end | Merge/adapt the Android feature, expose stable callback/render selectors, and test its FCM-specific payload contract independently |
 | Live Notification background/cold-start recovery | Add explicit process termination/relaunch scenarios and assert token-registration races, callback payload preservation, tap intent/deep link, and restart recovery |
+| Device token registration state through a public API | The Ext API customer response does not expose devices, and there is no customer-device read endpoint. Add a narrowly scoped test API or assert through a successful remote push/start; do not infer registration from a `device_change` activity alone. |
 | Flutter full flow | Add `Semantics(identifier: ...)` wrappers to ~15 widgets in the Flutter sample |
 | WebView-based in-app content assertion | Maestro can read WebView text on Android if JS-accessible. On iOS, usually not. Fall back to screenshots. |
 | Rich push payloads (images, action buttons) on iOS | Real device + `xcrun simctl push` with rich JSON |
+
+## Device registration race boundary
+
+The exact historical race—Live Notification token registration processed before
+`add_device`, leaving the upsert without `app_identifier`—is intentionally not a
+deterministic Maestro assertion. The OS controls token timing, and a
+`device_change` activity can prove that a device changed but not which ingress
+message won the race or how the final merge was resolved.
+
+Services owns the forced-order regression coverage in
+`domains/live_activities/registration_start_handshake_test.go`: it processes the
+registration first, resolves the real device upsert, applies the later login
+device state, and requires a subsequent Live Activity start to find the
+app-scoped token. Keep that focused services test gating. Use the remote iOS
+Maestro lane as an opt-in system outcome check when APNs supplies a token; a skip
+on a tokenless Simulator must not fail the deterministic standard profile.
 
 ## How to add a new visual in-app assertion
 
@@ -188,14 +210,15 @@ INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform ios --suite message-inb
 
 The command provisions the emulator/simulator, builds and installs the sample,
 prepares location permission where needed, runs Maestro, polls the backend, and
-collects evidence under the selected SDK repo:
+archives profile evidence under the shared harness:
 
-`artifacts/e2e/<platform>/<flow>/`
+`artifacts/e2e/profile-<timestamp>/<platform>/<flow>/`
 
-That directory contains the Maestro report/debug bundle, `sink.jsonl`, device
+Each suite directory contains the Maestro report/debug bundle, `sink.jsonl`, device
 logs, screenshots, raw video, the self-contained `tickmarks.html`, and JUnit XML
-in CI. The sink distinguishes UI success from backend success and includes the
-matched message/activity IDs and payload fields.
+in CI. Focused single-flow runs use the selected SDK repo's replaceable
+`artifacts/e2e/<platform>/<flow>/` path. The sink distinguishes UI success from
+backend success and includes the matched message/activity IDs and payload fields.
 
 ## Raw Maestro artifacts
 

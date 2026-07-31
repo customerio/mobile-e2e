@@ -160,11 +160,24 @@ if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" && "$PLATFORM" != "a
   die "the Android live notifications flow requires --platform android"
 fi
 
+if [[ -z "$SDK_REPO" && "$PLATFORM" == "android" ]]; then
+  if [[ -n "${ANDROID_SDK_REPO:-}" ]]; then
+    SDK_REPO="$ANDROID_SDK_REPO"
+  elif [[ -x "$PWD/gradlew" ]]; then
+    SDK_REPO="$PWD"
+  fi
+elif [[ -z "$SDK_REPO" && "$PLATFORM" == "ios" ]]; then
+  if [[ -n "${IOS_SDK_REPO:-}" ]]; then
+    SDK_REPO="$IOS_SDK_REPO"
+  elif [[ -f "$PWD/Apps/APN-UIKit/APN UIKit.xcodeproj/project.pbxproj" ]]; then
+    SDK_REPO="$PWD"
+  fi
+fi
 if [[ -z "$SDK_REPO" ]]; then
   if [[ "$PLATFORM" == "android" ]]; then
-    SDK_REPO="${ANDROID_SDK_REPO:-/Users/shahrozali/AndroidStudioProjects/customerio-android}"
+    die "SDK repo is not configured; pass --sdk-repo or set ANDROID_SDK_REPO"
   else
-    SDK_REPO="${IOS_SDK_REPO:-/Users/shahrozali/iOSProjects/customerio-ios}"
+    die "SDK repo is not configured; pass --sdk-repo or set IOS_SDK_REPO"
   fi
 fi
 SDK_REPO="$(cd "$SDK_REPO" 2>/dev/null && pwd)" || die "SDK repo does not exist: $SDK_REPO"
@@ -237,8 +250,8 @@ export LIVE_NOTIFICATION_APP_IDENTIFIER LIVE_NOTIFICATION_DEEP_LINK
 validate_generated_config_value() {
   local name="$1"
   local value="$2"
-  if [[ "$value" == *$'\n'* || "$value" == *'"'* ]]; then
-    die "$name contains an unsupported newline or quote"
+  if [[ "$value" == *$'\n'* || "$value" == *'"'* || "$value" == *'&'* || "$value" == *'\'* ]]; then
+    die "$name contains an unsupported newline, quote, ampersand, or backslash"
   fi
 }
 
@@ -377,7 +390,8 @@ validate_backend() {
     "$MAESTRO_EXT_API_BASE_URL/customers?email=maestro-doctor-no-match%40cio.test") || true
   [[ "$status" == "200" ]] || die "Ext API preflight returned HTTP ${status:-unreachable} at $MAESTRO_EXT_API_BASE_URL"
 
-  if [[ "$FLOW_NAME" == "live_activities" || "$FLOW_NAME" == "live_notifications_android" ]]; then
+  if [[ ("$FLOW_NAME" == "live_activities" && "$MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED" == "true") ||
+        ("$FLOW_NAME" == "live_notifications_android" && "$MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED" == "true") ]]; then
     if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
       die "MAESTRO_APP_API_KEY still contains the placeholder value"
     fi
@@ -485,10 +499,13 @@ find_ios_device() {
   local preferred="${IOS_SIMULATOR_NAME:-}"
   xcrun simctl list devices available -j | jq -r --arg preferred "$preferred" '
     [.devices[][] | select(.isAvailable == true) | select(.name | startswith("iPhone"))] as $phones |
-    (($phones | map(select($preferred != "" and .name == $preferred)))[0] //
-     ($phones | map(select(.name == "Maestro iPhone 17 Pro")))[0] //
-     ($phones | map(select(.name == "iPhone 17 Pro")))[0] //
-     $phones[0]).udid // empty'
+    if $preferred != "" then
+      (($phones | map(select(.name == $preferred)))[0].udid // empty)
+    else
+      ((($phones | map(select(.name == "Maestro iPhone 17 Pro")))[0] //
+        ($phones | map(select(.name == "iPhone 17 Pro")))[0] //
+        $phones[0]).udid // empty)
+    end'
 }
 
 start_ios_device() {
@@ -515,6 +532,9 @@ start_ios_device() {
   local selected
   selected=$(find_ios_device)
   if [[ -z "$selected" ]]; then
+    if [[ -n "${IOS_SIMULATOR_NAME:-}" ]]; then
+      die "requested iOS Simulator '$IOS_SIMULATOR_NAME' was not found"
+    fi
     die "no available iPhone simulator was found; install an iOS runtime in Xcode"
   fi
   [[ -n "$selected" ]] || die "no compatible iOS Simulator is available"
@@ -648,12 +668,18 @@ run_e2e() {
   export E2E_DEVICE_ID="$DEVICE_ID"
   export E2E_ARTIFACTS_DIR="$ARTIFACT_DIR"
   export E2E_NO_OPEN=1
+  export E2E_ENV_PRELOADED=true
   note "running $FLOW on $DEVICE_ID"
   set +e
   (cd "$SAMPLE_ROOT" && PLATFORM="$runner_platform" bash "$HARNESS_DIR/run.sh" "$FLOW")
   local result=$?
   set -e
   collect_device_logs
+  if ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$ARTIFACT_DIR" ||
+     ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" --check "$ARTIFACT_DIR"; then
+    echo "error: failed to sanitize final E2E artifacts" >&2
+    result=1
+  fi
   note "artifacts: $ARTIFACT_DIR"
   if [[ "$result" -ne 0 ]]; then
     echo "error: E2E flow failed with exit $result" >&2

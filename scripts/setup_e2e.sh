@@ -5,8 +5,8 @@ set -euo pipefail
 
 HARNESS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLATFORM="all"
-ANDROID_REPO="${ANDROID_SDK_REPO:-/Users/shahrozali/AndroidStudioProjects/customerio-android}"
-IOS_REPO="${IOS_SDK_REPO:-/Users/shahrozali/iOSProjects/customerio-ios}"
+ANDROID_REPO="${ANDROID_SDK_REPO:-}"
+IOS_REPO="${IOS_SDK_REPO:-}"
 FAILURES=0
 
 usage() {
@@ -41,6 +41,11 @@ fi
 check_platform() {
   local target_platform="$1"
   local repo="$2"
+  if [[ -z "$repo" ]]; then
+    echo "error: $target_platform SDK repo is not configured" >&2
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
   echo
   echo ">> checking $target_platform"
   set +e

@@ -9,8 +9,8 @@ HARNESS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE="standard"
 PLATFORM="all"
 FOCUSED_SUITE=""
-ANDROID_REPO="${ANDROID_SDK_REPO:-/Users/shahrozali/AndroidStudioProjects/customerio-android}"
-IOS_REPO="${IOS_SDK_REPO:-/Users/shahrozali/iOSProjects/customerio-ios}"
+ANDROID_REPO="${ANDROID_SDK_REPO:-}"
+IOS_REPO="${IOS_SDK_REPO:-}"
 KEEP_DEVICE=0
 HEADLESS=0
 RESULTS=()
@@ -107,10 +107,8 @@ record_result() {
   local suite="$2"
   local status="$3"
   local seconds="$4"
-  local repo="$5"
-  local artifact_name
-  artifact_name="$(suite_artifact_name "$suite")"
-  RESULTS+=("$target_platform|$suite|$status|$seconds|$repo/artifacts/e2e/$target_platform/$artifact_name")
+  local evidence_path="$5"
+  RESULTS+=("$target_platform|$suite|$status|$seconds|$evidence_path")
 }
 
 detect_preexisting_devices() {
@@ -167,15 +165,28 @@ run_platform() {
     echo ">> no $PROFILE suites are currently defined for $target_platform; skipping"
     return
   fi
+  [[ -n "$repo" ]] || die "$target_platform SDK repo is not configured"
 
   echo ">> preflighting $target_platform"
+  local doctor_suite
+  doctor_suite="${suites%% *}"
+  case " $suites " in
+    *" live-activities-remote "*) doctor_suite="live-activities-remote" ;;
+    *" live-notifications-remote "*) doctor_suite="live-notifications-remote" ;;
+    *" message-inbox "*) doctor_suite="message-inbox" ;;
+  esac
+  local doctor_dir="$SUMMARY_DIR/$target_platform/doctor"
+  local doctor_log="$doctor_dir/doctor.log"
+  mkdir -p "$doctor_dir"
   set +e
-  "$HARNESS_DIR/e2e" doctor --platform "$target_platform" --sdk-repo "$repo" >/dev/null
+  "$HARNESS_DIR/e2e" doctor --platform "$target_platform" --suite "$doctor_suite" --sdk-repo "$repo" \
+    >"$doctor_log" 2>&1
   local doctor_result=$?
   set -e
   if [[ "$doctor_result" -ne 0 ]]; then
+    cat "$doctor_log" >&2
     echo "error: $target_platform preflight failed" >&2
-    record_result "$target_platform" "doctor" "FAILED" "0" "$repo"
+    record_result "$target_platform" "doctor" "FAILED" "0" "$doctor_dir"
     FAILURES=$((FAILURES + 1))
     return
   fi
@@ -183,7 +194,23 @@ run_platform() {
   local first=1
   local suite
   for suite in $suites; do
-    local args=(run --platform "$target_platform" --suite "$suite" --sdk-repo "$repo" --skip-doctor --keep-device)
+    local artifact_name
+    artifact_name="$(suite_artifact_name "$suite")"
+    local source_artifacts="$repo/artifacts/e2e/$target_platform/$artifact_name"
+    local evidence_artifacts="$SUMMARY_DIR/$target_platform/$artifact_name"
+    mkdir -p "$source_artifacts" "$evidence_artifacts"
+    # Per-flow SDK artifact paths are stable for focused debugging. Clear them
+    # before a profile suite so a pre-build/device failure cannot inherit a
+    # previous run's build log, video, or backend evidence.
+    find "$source_artifacts" -mindepth 1 -delete
+
+    local args=(run --platform "$target_platform" --suite "$suite" --sdk-repo "$repo" --skip-doctor)
+    # Android is expensive to cold-boot and is stable across Maestro sessions.
+    # iOS defaults to a clean Simulator session between suites because stale
+    # XCUITest input services can silently drop text entry.
+    if [[ "$target_platform" == "android" || "$KEEP_DEVICE" == 1 ]]; then
+      args+=(--keep-device)
+    fi
     if [[ "$first" == 0 ]]; then
       args+=(--skip-build)
     fi
@@ -200,19 +227,34 @@ run_platform() {
     local result=$?
     set -e
     local elapsed=$(( $(date +%s) - started ))
+
+    local build_log="$source_artifacts/build.log"
+    local build_succeeded=0
+    if [[ "$result" == 0 ]] ||
+       { [[ -f "$build_log" ]] && grep -Eq 'BUILD SUCCESSFUL|\*\* BUILD SUCCEEDED \*\*' "$build_log"; }; then
+      build_succeeded=1
+    fi
+
+    set +e
+    cp -R "$source_artifacts/." "$evidence_artifacts/"
+    local copy_result=$?
+    set -e
+    if [[ "$copy_result" -ne 0 ]]; then
+      echo "error: could not archive $target_platform $suite evidence" >&2
+      result=1
+    fi
+
     if [[ "$result" == 0 ]]; then
-      record_result "$target_platform" "$suite" "PASSED" "$elapsed" "$repo"
+      record_result "$target_platform" "$suite" "PASSED" "$elapsed" "$evidence_artifacts"
     else
-      record_result "$target_platform" "$suite" "FAILED" "$elapsed" "$repo"
+      record_result "$target_platform" "$suite" "FAILED" "$elapsed" "$evidence_artifacts"
       FAILURES=$((FAILURES + 1))
     fi
 
     # A flow can fail after a successful build; keep reusing that artifact. If
     # the failure happened during the build itself, let the next suite retry it
     # instead of cascading misleading install errors from --skip-build.
-    local build_log="$repo/artifacts/e2e/$target_platform/$(suite_artifact_name "$suite")/build.log"
-    if [[ "$result" == 0 ]] ||
-       { [[ -f "$build_log" ]] && grep -Eq 'BUILD SUCCESSFUL|\*\* BUILD SUCCEEDED \*\*' "$build_log"; }; then
+    if [[ "$build_succeeded" == 1 ]]; then
       first=0
     else
       echo "warn: no successful $target_platform build found; the next suite will rebuild" >&2

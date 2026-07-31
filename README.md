@@ -65,10 +65,12 @@ The original single-flow interface remains the debugging escape hatch:
 ./e2e run --platform ios --suite live-activities --keep-device
 ```
 
-The runner discovers the local SDK repos by default. Use the profile-level
-`--android-sdk-repo` / `--ios-sdk-repo` flags for different checkouts, or
-single-flow `--sdk-repo`. Every run provisions or boots a compatible virtual
-device when none is available; no separately managed simulator is required.
+Cross-platform harness runs read `ANDROID_SDK_REPO` and `IOS_SDK_REPO` from the
+shared configuration. The native-repo shortcuts supply their own checkout
+automatically. You can also use profile-level `--android-sdk-repo` /
+`--ios-sdk-repo` flags, or single-flow `--sdk-repo`. Every run provisions or
+boots a compatible virtual device when none is available; no separately managed
+simulator is required.
 
 Credentials remain outside git. The preferred cross-platform configuration is
 the harness's gitignored `.env.e2e.local`:
@@ -82,6 +84,8 @@ ANDROID_SITE_ID=...
 IOS_CDP_API_KEY=...
 IOS_SITE_ID=...
 E2E_WORKSPACE_NAME=Mobile E2E
+ANDROID_SDK_REPO=/absolute/path/to/customerio-android
+IOS_SDK_REPO=/absolute/path/to/customerio-ios
 ```
 
 When the platform CDP/site pair is provided, the runner writes the SDK sample's
@@ -281,6 +285,11 @@ single-flow runner as local profiles:
 - Manual dispatch supports `quick`, `standard`, or one focused suite.
 - iOS additionally exposes the explicit `remote` APNs profile.
 
+PR and scheduled jobs remain disabled until the repository variable
+`MOBILE_E2E_ENABLED=true` is set after the harness is published and the required
+credentials have been provisioned. Manual dispatch remains available for the
+initial CI proving runs.
+
 Fork and Dependabot PRs do not receive workspace secrets and therefore do not
 run the backend job. Each matrix job provisions its own virtual device, builds
 the SDK sample from source, and uploads `artifacts/e2e/` even on failure. The
@@ -296,13 +305,20 @@ Required repository secrets:
 - Existing sample CDP/site secrets (`CUSTOMERIO_JAVA_WORKSPACE_*` on Android,
   `CUSTOMERIO_APN_WORKSPACE_*` on iOS).
 - `MOBILE_E2E_EXT_API_KEY` for backend assertions.
+- `MOBILE_E2E_APP_API_KEY` for transactional Inbox sends and remote Live
+  Notifications operations.
 - `MOBILE_E2E_INBOX_TRANSACTIONAL_MESSAGE_ID` repository variable containing a
-  published Inbox template ID for the manual `message-inbox` suite.
-- `MOBILE_E2E_REPO_TOKEN` only when the workflow's default token cannot read the
-  shared `customerio/mobile-e2e` repository.
+  published Inbox template ID for the standard and focused Inbox suites.
 
-`MOBILE_E2E_APP_API_KEY` is an optional override for the remote lane; otherwise
-the workflow reuses `MOBILE_E2E_EXT_API_KEY`.
+Publish and merge `customerio/mobile-e2e` before enabling either native
+workflow. After that initial rollout, pin native workflow checkouts to a reviewed
+harness tag or commit when reproducibility is more important than immediately
+consuming harness fixes.
+
+Profile runs archive immutable evidence beneath
+`mobile-e2e/artifacts/e2e/profile-<timestamp>/<platform>/<flow>/`; the summary
+links to those snapshots. Focused low-level runs continue to use the selected SDK
+repo's replaceable `artifacts/e2e/<platform>/<flow>/` debugging path.
 
 ## Geofence workspace behavior
 

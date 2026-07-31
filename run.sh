@@ -33,13 +33,15 @@ find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
 rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
 
 # --- Env
+# The top-level runner has already applied caller > shared file > sample file
+# precedence. Direct low-level invocations still load the sample-local file.
 CALLER_REMOTE_FLAG_SET="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED+x}"
 CALLER_REMOTE_FLAG="${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:-}"
 CALLER_NOTIFICATION_REMOTE_FLAG_SET="${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED+x}"
 CALLER_NOTIFICATION_REMOTE_FLAG="${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:-}"
 CALLER_INBOX_MESSAGE_ID_SET="${INBOX_TRANSACTIONAL_MESSAGE_ID+x}"
 CALLER_INBOX_MESSAGE_ID="${INBOX_TRANSACTIONAL_MESSAGE_ID:-}"
-if [[ -f "$SAMPLE_MAESTRO_DIR/.env" ]]; then
+if [[ "${E2E_ENV_PRELOADED:-false}" != "true" && -f "$SAMPLE_MAESTRO_DIR/.env" ]]; then
   set -a; source "$SAMPLE_MAESTRO_DIR/.env"; set +a
 fi
 if [[ "$CALLER_REMOTE_FLAG_SET" == "x" ]]; then
