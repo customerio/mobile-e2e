@@ -14,38 +14,83 @@ backend responses. Each sample repo can consume this harness through a runtime
 clone at `.maestro/harness/`; CI checks it out at `.e2e-harness`. Platform-
 specific SDK builds and credentials stay in the sample repos themselves.
 
-## One-command local runs
+## Team quick start
 
 From this repository:
 
 ```bash
-# Verify tools, sample configuration, and Ext API access without starting a device.
-./e2e doctor --platform android
-./e2e doctor --platform ios
+# One-time local validation.
+cp .env.e2e.example .env.e2e.local
+# Fill the test-workspace values, then:
+./e2e setup
 
-# Create/boot an emulator or simulator, build and install the SDK sample,
-# run Maestro, validate Customer.io backend state, and collect evidence.
-./e2e run --platform android --suite smoke
-./e2e run --platform ios --suite smoke
-./e2e run --platform android --suite geofence
-./e2e run --platform ios --suite geofence
-INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform android --suite message-inbox
-INBOX_TRANSACTIONAL_MESSAGE_ID=<id> ./e2e run --platform ios --suite message-inbox
-./e2e run --platform ios --suite live-activities
+# The default: every deterministic suite on Android and iOS.
+./e2e test
 ```
 
-The runner discovers the local SDK repos by default. Use `--sdk-repo PATH` for a
-different checkout and `--skip-build` while iterating. Normal iOS runs restart a
-reused Simulator to keep XCUITest input deterministic; `--keep-device` preserves
-the current visual state for faster debugging. Use `--headless` in automation.
-Every run provisions or boots a compatible virtual device when none is
-available; no separately managed simulator is required.
+Nothing else needs to be running. The profile runner validates the environment,
+boots/reuses virtual devices, builds each SDK sample once, reinstalls it with
+fresh storage for each suite, runs every flow sequentially, and writes a combined
+summary without hiding later results when an earlier suite fails.
 
-Credentials remain outside git. Configure each sample as usual and put an Ext
-API bearer token in the sample's `.maestro/.env`:
+| Profile | Android | iOS | Use |
+|---|---|---|---|
+| `quick` | smoke | smoke | Fast local/PR confidence |
+| `standard` (default; `all` alias) | smoke, geofence, message Inbox | smoke, geofence, message Inbox, local Live Activities | Local full run and weekday CI |
+| `remote` | none until Android remote delivery is deterministic | backend/APNs Live Activities | Explicit manual integration lane |
+
+Useful focused commands:
+
+```bash
+./e2e test --profile quick
+./e2e test --platform android
+./e2e test --platform ios
+./e2e test --platform ios --suite message-inbox
+./e2e test --profile remote --platform ios
+```
+
+From a native SDK checkout, the equivalent shortcuts are:
+
+```bash
+make e2e          # standard profile for this SDK
+make e2e-setup    # one-time preflight
+make e2e-quick
+make e2e-inbox
+```
+
+The original single-flow interface remains the debugging escape hatch:
+
+```bash
+./e2e run --platform android --suite geofence
+./e2e run --platform ios --suite live-activities --keep-device
+```
+
+The runner discovers the local SDK repos by default. Use the profile-level
+`--android-sdk-repo` / `--ios-sdk-repo` flags for different checkouts, or
+single-flow `--sdk-repo`. Every run provisions or boots a compatible virtual
+device when none is available; no separately managed simulator is required.
+
+Credentials remain outside git. The preferred cross-platform configuration is
+the harness's gitignored `.env.e2e.local`:
 
 ```bash
 MAESTRO_EXT_API_KEY=...
+MAESTRO_APP_API_KEY=...
+INBOX_TRANSACTIONAL_MESSAGE_ID=21
+ANDROID_CDP_API_KEY=...
+ANDROID_SITE_ID=...
+IOS_CDP_API_KEY=...
+IOS_SITE_ID=...
+E2E_WORKSPACE_NAME=Mobile E2E
+```
+
+When the platform CDP/site pair is provided, the runner writes the SDK sample's
+gitignored configuration before preflight/build. Existing per-sample
+`.maestro/.env` files remain supported for native-repo-only usage:
+
+```bash
+MAESTRO_EXT_API_KEY=...
+INBOX_TRANSACTIONAL_MESSAGE_ID=21
 ```
 
 The token must be able to read customers, messages, and activities in the same
@@ -58,18 +103,19 @@ rendering, and a separate always-run CI sanitizer gates artifact upload.
 The iOS Live Activities suite has two lanes:
 
 ```bash
-# Local Segments, Delivery, and Countdown ActivityKit lifecycles with Lock
-# Screen/deep-link evidence plus the correlated Segments backend conversation.
+# Deterministic Segments, Delivery, and Countdown ActivityKit lifecycles with
+# Lock Screen/deep-link evidence. No Apple device token is required.
 ./e2e run --platform ios --suite live-activities
 
-# The same checks plus App API → services → APNs sandbox → Simulator
-# push-to-start, update, and end.
+# The same checks plus device-sourced backend lifecycle records and App API →
+# services → APNs sandbox → Simulator push-to-start, update, and end.
 ./e2e run --platform ios --suite live-activities-remote
 ```
 
-The remote lane additionally requires Live Notifications on the workspace,
-valid APNs sandbox credentials for the APN-UIKit bundle, and a Mac with Apple
-silicon or a T2 chip running macOS 13 or later. Set
+The remote lane additionally requires Live Notifications on the workspace, a
+real Simulator APNs device token, valid APNs sandbox credentials for the
+APN-UIKit bundle, and a Mac with Apple silicon or a T2 chip running macOS 13 or
+later. Set
 `LIVE_ACTIVITY_APP_IDENTIFIER` only when that exact identifier is configured
 as an app in the workspace; an installed bundle identifier alone is not
 enough, and an invalid value is rejected before delivery. The Customer.io CDP
@@ -101,8 +147,8 @@ flows/
   campaign_141.yaml            # Full E2E loop: SDK identify → backend → campaign
                                # 141 → in-app + inline + push, with visual proof
                                # of the push notification.
-  smoke_login_event.yaml       # Smoke: identify → backend in_app sent → modal
-                               # rendered + dismissed → exact custom event persisted.
+  smoke_login_event.yaml       # Smoke: identify → optional welcome modal →
+                               # exact run-correlated custom event persisted.
   geofence_basic.yaml          # Always permission → outside location → registered
                                # fences → inside location → backend geofence activity.
   inline_messages.yaml         # Template for inline in-app validation (needs a
@@ -207,7 +253,8 @@ is already installed on a booted device.
 - `maestro` CLI
 - Bearer token for Customer.io Ext API in `MAESTRO_EXT_API_KEY`
 - Published transactional Inbox template with non-empty `properties.title` and
-  `properties.body`; pass its ID as `INBOX_TRANSACTIONAL_MESSAGE_ID`
+  `properties.body`; the shared fixture currently uses
+  `INBOX_TRANSACTIONAL_MESSAGE_ID=21`
 - Live Notifications entitlement and APNs sandbox setup for the remote lane
 
 `./e2e doctor --platform <platform>` reports missing prerequisites before any
@@ -226,12 +273,18 @@ queue assertion fails explicitly when the fixture is incompatible.
 
 ## CI
 
-Both native SDK repos contain a `Maestro SDK E2E` workflow. It runs smoke
-on weekdays and offers `message-inbox` as a manual dispatch. iOS additionally
-offers manual `live-activities` and `live-activities-remote` dispatches. Each job
-checks out this harness, provisions a virtual device,
-builds the SDK sample from source, runs the same command used locally, and
-uploads `artifacts/e2e/` even on failure.
+Both native SDK repos contain a `Maestro SDK E2E` workflow using the same
+single-flow runner as local profiles:
+
+- Same-repository pull requests run the `quick` profile.
+- Weekday schedules run the `standard` profile as a parallel suite matrix.
+- Manual dispatch supports `quick`, `standard`, or one focused suite.
+- iOS additionally exposes the explicit `remote` APNs profile.
+
+Fork and Dependabot PRs do not receive workspace secrets and therefore do not
+run the backend job. Each matrix job provisions its own virtual device, builds
+the SDK sample from source, and uploads `artifacts/e2e/` even on failure. The
+workflow result is the aggregate gate; individual jobs retain isolated evidence.
 
 The legacy `campaign` and `inline` suites remain available locally for
 workspaces/devices that meet their prerequisites; they are not offered as CI
@@ -261,8 +314,9 @@ Set `GEOFENCE_ID=<id>` to make iOS enforce a specific seeded fence as well.
 
 The local Live Activities lane drives the registered Segments, Delivery, and
 Countdown examples through start, in-place update, Lock Screen rendering,
-widget-URL re-entry, and final system state. It also correlates the Segments
-SDK-minted instance with device-sourced Customer.io start/end deliveries. The
-opt-in remote lane additionally proves real APNs sandbox delivery by matching a
-unique run id in ActivityKit after each App API operation; a backend `sent`
-status alone is not treated as device receipt.
+widget-URL re-entry, and final system state without depending on Apple issuing a
+device token to a clean CI Simulator. The opt-in remote lane requires that token,
+correlates the SDK-minted instance with device-sourced Customer.io start/end
+deliveries, and proves real APNs sandbox delivery by matching a unique run id in
+ActivityKit after each App API operation; a backend `sent` status alone is not
+treated as device receipt.

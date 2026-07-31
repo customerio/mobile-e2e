@@ -36,9 +36,8 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 
 | Case | How |
 |---|---|
-| SDK identify reached the server | `runScript: assert_message_delivered.js` polls `/v1/customers?email=<unique>` → resolves cio_id |
-| Identify triggered the expected segment campaign | same script then polls `/v1/customers/:cio_id/messages`, matches `type=in_app` with `metrics.sent` populated |
-| In-app modal rendered when this installation is eligible | conditional `assertVisible: ".*Thank you for choosing.*"` + `takeScreenshot`; backend dispatch remains the hard assertion because repeat-run eligibility is workspace state |
+| SDK identify reached the server | the smoke flow resolves the exact run-correlated event by the fresh identified email; a welcome in-app is visual evidence only when that workspace is configured to send one |
+| In-app modal rendered when this installation is eligible | conditional `assertVisible: ".*Thank you for choosing.*"` + `takeScreenshot`; dedicated campaign tests own campaign dispatch assertions |
 | Modal dismissed correctly | conditional `tapOn: "Continue"` + `assertNotVisible` |
 | Exact custom event persisted | send `maestro_test_event` with a unique `run_id`, then poll `/v1/customers/:cio_id/activities` for both exact values after the run start |
 | SDK one-shot location reached backend | move the virtual device outside, tap `Request location once (SDK)`, then poll for `event=CIO Location Update` with both exact latitude and longitude |
@@ -51,12 +50,12 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Inbox click and delete | Call the public click API and require the Ext API `clicked` metric; delete through the SDK and require three consecutive Gist polls with the run marker absent plus the native empty state |
 | Inbox visual rendering and CTA | Send a second isolated delivery, require a visual-compatible server payload, render it first in a dedicated full-screen SDK Inbox and then through the optional bell/sheet overlay, match the same queue title/body and published CTA in both Jist presentations, require the exact delivery's opened metric, tap its dismiss action, then require stable queue absence |
 | iOS local Live Activity visual lifecycle | Drive the registered Segments, Delivery, and Countdown examples through start/update/end; require one stable ActivityKit and Customer.io instance per template; assert active/final Lock Screen content; tap the card and verify widget-URL re-entry to the Live Activities screen; save each state as evidence |
-| iOS local Live Activity lifecycle reached backend | Copy the SDK-minted `cioInstanceId` from ActivityKit, poll `/v1/live_notifications/:id`, require device-sourced start/end on that same conversation, and hold the backend at its original start delivery for 8 seconds after a local-only update |
 
 ### 🧪 Opt-in integration coverage
 
 | Case | How | Prerequisites |
 |---|---|---|
+| iOS local Live Activity lifecycle reached backend | Copy the SDK-minted `cioInstanceId` from ActivityKit, poll `/v1/live_notifications/:id`, require device-sourced start/end on that same conversation, and hold the backend at its original start delivery for 8 seconds after a local-only update | A real Simulator APNs device token; enabled automatically by the `live-activities-remote` suite, or explicitly with `MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED=true` |
 | iOS backend push-to-start | Call `/v1/live_notifications/start`, poll status to `sent`, then match the unique run id in ActivityKit; successful delivery proves the SDK's consumed push-to-start registration reached Customer.io | Live Notifications plan, App API key, configured APNs sandbox key, supported Simulator host, and the dedicated `Live Notification Token` CDP action |
 | iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
 | Remote Live Activity system surface | Background the app after remote updates and capture the Simulator system presentation | Dynamic Island-capable Simulator model |
@@ -167,6 +166,16 @@ With these seeded, every row in the "Coverable with small additions" section abo
 ## One-command execution and artifacts
 
 ```bash
+# Full deterministic local profile. Provisions devices and builds each platform once.
+./e2e test
+
+# Fast/focused profiles.
+./e2e test --profile quick
+./e2e test --platform android
+./e2e test --platform ios --suite message-inbox
+./e2e test --profile remote --platform ios
+
+# Single-flow debugging remains available.
 ./e2e run --platform android --suite smoke
 ./e2e run --platform ios --suite smoke
 ./e2e run --platform android --suite geofence

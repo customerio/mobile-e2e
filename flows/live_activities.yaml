@@ -57,6 +57,28 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "custom_event_button"
     timeout: 30000
 
+# A clean local/CI Simulator is not guaranteed to receive an APNs device token.
+# The explicit remote profile requests permission and then requires registration
+# before any backend/APNs assertions run.
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED == "true"}
+    commands:
+      - scrollUntilVisible:
+          element:
+            text: "^Show Push Prompt$"
+          direction: DOWN
+          timeout: 15000
+          centerElement: true
+      - tapOn: "^Show Push Prompt$"
+      - tapOn:
+          text: "^Allow$"
+          optional: true
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "5000"
+
 # --- Open the feature-PR Live Activities driver ---
 - scrollUntilVisible:
     element:
@@ -86,6 +108,15 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     visible:
       id: "live_activity_system_status"
     timeout: 30000
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED == "true"}
+    commands:
+      - extendedWaitUntil:
+          visible:
+            id: "live_activity_system_status"
+            text: "(?s).*sdkDeviceToken=present.*"
+          timeout: 30000
 - scrollUntilVisible:
     element:
       id: "live_activity_end_all"
@@ -209,22 +240,25 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
 - evalScript: ${output.local_segments_activitykit_id = output.live_activitykit_id}
 - evalScript: ${output.local_segments_instance_id = output.live_instance_id}
 
-# The SDK event is consumed by the Customer.io CDP destination and becomes a
-# device-sourced live_notification conversation. Assert that exact backend
-# record rather than looking for a generic customer activity.
-- runScript:
-    file: ../scripts/assert_live_notification_status.js
-    env:
-      LIVE_INSTANCE_ID: ${output.live_instance_id}
-      EXPECTED_STATE: "active"
-      EXPECTED_OPERATION: "start"
-      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
-      EXPECTED_SOURCE: "device"
-      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
-      MAX_WAIT_MS: "90000"
-- assertTrue: ${output.live_status_ok === "true"}
-- assertTrue: ${output.live_status_delivery_id !== ""}
-- evalScript: ${output.local_start_delivery_id = output.live_status_delivery_id}
+# With a real device token, the SDK event is consumed by the Customer.io CDP
+# destination and becomes a device-sourced live_notification conversation.
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED == "true"}
+    commands:
+      - runScript:
+          file: ../scripts/assert_live_notification_status.js
+          env:
+            LIVE_INSTANCE_ID: ${output.live_instance_id}
+            EXPECTED_STATE: "active"
+            EXPECTED_OPERATION: "start"
+            EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+            EXPECTED_SOURCE: "device"
+            MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+            MAX_WAIT_MS: "90000"
+      - assertTrue: ${output.live_status_ok === "true"}
+      - assertTrue: ${output.live_status_delivery_id !== ""}
+      - evalScript: ${output.local_start_delivery_id = output.live_status_delivery_id}
 - runFlow:
     when:
       visible: "Continue"
@@ -266,22 +300,25 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
 - assertTrue: ${output.live_activitykit_id === output.local_segments_activitykit_id}
 - assertTrue: ${output.live_instance_id === output.local_segments_instance_id}
 
-# A local SDK update is intentionally ActivityKit-only. Hold the backend
-# conversation stable for several seconds and require its last delivery to
-# remain the original device-sourced start.
-- runScript:
-    file: ../scripts/assert_live_notification_status.js
-    env:
-      LIVE_INSTANCE_ID: ${output.live_instance_id}
-      EXPECTED_STATE: "active"
-      EXPECTED_OPERATION: "start"
-      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
-      EXPECTED_SOURCE: "device"
-      EXPECTED_DELIVERY_ID: ${output.local_start_delivery_id}
-      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
-      MIN_STABLE_MS: "8000"
-      MAX_WAIT_MS: "20000"
-- assertTrue: ${output.live_status_ok === "true"}
+# A local SDK update is intentionally ActivityKit-only. When device/backend
+# validation is enabled, require the backend's last delivery to remain start.
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED == "true"}
+    commands:
+      - runScript:
+          file: ../scripts/assert_live_notification_status.js
+          env:
+            LIVE_INSTANCE_ID: ${output.live_instance_id}
+            EXPECTED_STATE: "active"
+            EXPECTED_OPERATION: "start"
+            EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+            EXPECTED_SOURCE: "device"
+            EXPECTED_DELIVERY_ID: ${output.local_start_delivery_id}
+            MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+            MIN_STABLE_MS: "8000"
+            MAX_WAIT_MS: "20000"
+      - assertTrue: ${output.live_status_ok === "true"}
 
 # Capture the full system-owned Lock Screen card while the original screen still
 # owns the local handle needed for the subsequent SDK end operation.
@@ -359,19 +396,23 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     timeout: 20000
 - takeScreenshot: artifacts/live_activities_05_local_end
 
-# The same SDK-minted id must now be ended by a device-sourced backend
-# operation. Reusing output.live_instance_id is the correlation assertion.
-- runScript:
-    file: ../scripts/assert_live_notification_status.js
-    env:
-      LIVE_INSTANCE_ID: ${output.live_instance_id}
-      EXPECTED_STATE: "ended"
-      EXPECTED_OPERATION: "end"
-      EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
-      EXPECTED_SOURCE: "device"
-      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
-      MAX_WAIT_MS: "90000"
-- assertTrue: ${output.live_status_ok === "true"}
+# With device/backend validation enabled, the same SDK-minted id must now be
+# ended by a device-sourced backend operation.
+- runFlow:
+    when:
+      true: ${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED == "true"}
+    commands:
+      - runScript:
+          file: ../scripts/assert_live_notification_status.js
+          env:
+            LIVE_INSTANCE_ID: ${output.live_instance_id}
+            EXPECTED_STATE: "ended"
+            EXPECTED_OPERATION: "end"
+            EXPECTED_NOTIFICATION_TYPE: "io.customer.livenotifications.segments"
+            EXPECTED_SOURCE: "device"
+            MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+            MAX_WAIT_MS: "90000"
+      - assertTrue: ${output.live_status_ok === "true"}
 - runFlow:
     when:
       visible: "Continue"

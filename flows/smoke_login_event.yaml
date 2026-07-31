@@ -1,13 +1,12 @@
 appId: ${APP_ID}
 tags:
   - smoke
-name: Smoke — identify → campaign dispatch → custom event persisted
+name: Smoke — identify → custom event persisted
 ---
 # Fast smoke check of the identify path. Validates:
 #   1. The sample app logs in with a fresh email.
-#   2. The backend receives the identify and campaign 55 ("New CIO Tester")
-#      dispatches an in_app (sent metric populated).
-#   3. If the workspace delivers the welcome modal to this installation, it
+#   2. The backend resolves that identified customer by the unique email.
+#   3. If the workspace delivers a welcome modal to this installation, it
 #      renders on the device and can be dismissed.
 #   4. A custom event with the unique run_id is persisted by the backend.
 #
@@ -37,21 +36,9 @@ name: Smoke — identify → campaign dispatch → custom event persisted
 - assertVisible:
     id: "custom_event_button"
 
-# --- Backend assertion: identify → campaign 55 → in_app dispatched ---
-- runScript:
-    file: ../scripts/assert_message_delivered.js
-    env:
-      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
-      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
-      RUN_EMAIL: ${output.email}
-      EXPECTED_TYPE: "in_app"
-      MIN_METRIC: "sent"
-      MAX_WAIT_MS: "60000"
-- assertTrue: ${output.assert_ok === "true"}
-
-# --- Visual proof when the identify campaign is eligible on this device ---
-# Backend dispatch is the hard contract above. Rendering is conditional because
-# campaign eligibility and installation state belong to workspace configuration.
+# --- Visual proof when a workspace welcome campaign is eligible ---
+# Rendering is conditional because campaign configuration, eligibility, and
+# installation state are deliberately outside this cross-platform smoke gate.
 - runFlow:
     when:
       visible: "Continue"
@@ -68,12 +55,35 @@ name: Smoke — identify → campaign dispatch → custom event persisted
     visible:
       id: "event_name_input"
     timeout: 10000
+# A welcome campaign can arrive asynchronously after navigation. Re-check at
+# field boundaries so it cannot cover the form halfway through entry.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - takeScreenshot: artifacts/smoke_01_modal
+      - tapOn: "Continue"
+      - assertNotVisible: "Continue"
 - tapOn:
     id: "event_name_input"
 - inputText: "maestro_test_event"
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - takeScreenshot: artifacts/smoke_01_modal
+      - tapOn: "Continue"
+      - assertNotVisible: "Continue"
 - tapOn:
     id: "property_name_input"
 - inputText: "run_id"
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - takeScreenshot: artifacts/smoke_01_modal
+      - tapOn: "Continue"
+      - assertNotVisible: "Continue"
 - tapOn:
     id: "property_value_input"
 - inputText: ${output.run_id}
@@ -98,7 +108,9 @@ name: Smoke — identify → campaign dispatch → custom event persisted
 - tapOn:
     id: "send_event_button"
 
-# --- Backend assertion: exact custom event + per-run property arrived ---
+# --- Hard backend assertion: identify + exact custom event arrived ---
+# Resolving the event by this run's unique email proves the SDK identified the
+# customer before attaching and flushing the run-correlated event.
 - runScript:
     file: ../scripts/assert_customer_activity.js
     env:
