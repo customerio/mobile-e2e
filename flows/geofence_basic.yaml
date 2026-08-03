@@ -12,8 +12,8 @@ name: Geofence — outside → inside → backend transition
 #           → SDK sends the transition
 #             → Ext API exposes the matching `geofence` activity.
 #
-# Defaults target the seeded City Hall Park fence in the test workspace.
-# Coordinates and expected id can be overridden by the one-command runner.
+# Defaults target exact seeded fixtures: Android City Hall Park fence 83 and
+# iOS fence 3488 at the inside coordinate. Coordinates/id remain overridable.
 
 - runScript:
     file: ../scripts/setup_run.js
