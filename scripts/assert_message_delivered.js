@@ -1,8 +1,8 @@
 // Waits up to MAX_WAIT_MS for a message of EXPECTED_TYPE to appear for
-// RUN_EMAIL with the MIN_METRIC populated. Polls Customer.io Ext API.
+// RUN_EMAIL with the MIN_METRIC populated. Polls the Customer.io Ext API.
 //
 // Required env (passed via runScript.env):
-//   MAESTRO_EXT_API_KEY  - Bearer token for api.customer.io
+//   MAESTRO_APP_API_KEY  - Bearer token for api.customer.io
 //   RUN_EMAIL            - Customer email (unique per test run)
 //   EXPECTED_TYPE        - in_app | push | email | slack
 //
@@ -36,7 +36,7 @@
         (typeof MAX_WAIT_MS === "string" && MAX_WAIT_MS) ? MAX_WAIT_MS : "20000", 10)
     var INTERVAL = parseInt(
         (typeof POLL_INTERVAL_MS === "string" && POLL_INTERVAL_MS) ? POLL_INTERVAL_MS : "750", 10)
-    var AUTH = { "Authorization": "Bearer " + MAESTRO_EXT_API_KEY }
+    var AUTH = { "Authorization": "Bearer " + MAESTRO_APP_API_KEY }
     // Local sink for surfacing backend values in the rendered HTML report.
     var SINK_BASE = (typeof E2E_SINK_BASE_URL === "string" && E2E_SINK_BASE_URL.length > 0)
         ? E2E_SINK_BASE_URL.replace(/\/$/, "")

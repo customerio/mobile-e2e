@@ -76,7 +76,6 @@ Credentials remain outside git. The preferred cross-platform configuration is
 the harness's gitignored `.env.e2e.local`:
 
 ```bash
-MAESTRO_EXT_API_KEY=...
 MAESTRO_APP_API_KEY=...
 INBOX_TRANSACTIONAL_MESSAGE_ID=21
 ANDROID_CDP_API_KEY=...
@@ -93,11 +92,11 @@ gitignored configuration before preflight/build. Existing per-sample
 `.maestro/.env` files remain supported for native-repo-only usage:
 
 ```bash
-MAESTRO_EXT_API_KEY=...
+MAESTRO_APP_API_KEY=...
 INBOX_TRANSACTIONAL_MESSAGE_ID=21
 ```
 
-The token must be able to read customers, messages, and activities in the same
+The App API key must be able to read customers, messages, and activities in the same
 workspace used by that sample's CDP key. The flows rely on Maestro's documented
 automatic import of `MAESTRO_`-prefixed shell variables, so the token is never
 copied into a `runScript.env` block. Because Maestro still serializes imported
@@ -127,9 +126,10 @@ destination must have both dedicated `Live Notification Event` and
 `Live Notification Token` actions enabled. For iOS 18+, the services start
 payload must also carry `input-push-token: 1` so ActivityKit issues the
 per-instance token used by update and end.
-`MAESTRO_EXT_API_KEY` is an App API bearer token and is used for both customer
-and Live Notifications endpoints; `MAESTRO_APP_API_KEY` remains available as
-an optional override. API keys, workspace site IDs, and the optional app
+`MAESTRO_APP_API_KEY` authenticates both the customer/message/activity Ext API
+and Live Notifications operations. Existing gitignored local `.env` files that
+still use `MAESTRO_EXT_API_KEY` remain compatible, but new configuration and CI
+use the canonical App API key name. API keys, workspace site IDs, and the optional app
 identifier are redacted from generated artifacts before reports or CI uploads
 whenever they are supplied as protected values.
 
@@ -242,8 +242,7 @@ is already installed on a booted device.
 
 - `.maestro/run.sh` — the platform-specific capture + renderer orchestration
   (adb screenrecord for Android, simctl screenshot loop for iOS).
-- `.maestro/.env` — per-dev `MAESTRO_EXT_API_KEY`; optionally set
-  `MAESTRO_APP_API_KEY` when Live Notifications uses a different credential.
+- `.maestro/.env` — per-dev `MAESTRO_APP_API_KEY` (gitignored).
 - `.maestro/scripts/capture_frames.sh` — iOS-only; polls `simctl screenshot`
   at 5fps because `simctl recordVideo` collides with Maestro's active session.
 - Any sample-app-specific screen navigation that hasn't been unified yet.
@@ -255,7 +254,8 @@ is already installed on a booted device.
 - Python 3; Pillow is optional but required for annotated MP4 rendering
 - `ffmpeg` on PATH (video assembly + annotated composite)
 - `maestro` CLI
-- Bearer token for Customer.io Ext API in `MAESTRO_EXT_API_KEY`
+- Customer.io App API key in `MAESTRO_APP_API_KEY`; the same credential is used
+  for Ext API assertions, Inbox sends, and remote Live Notifications operations
 - Published transactional Inbox template with non-empty `properties.title` and
   `properties.body`; the shared fixture currently uses
   `INBOX_TRANSACTIONAL_MESSAGE_ID=21`
@@ -304,9 +304,8 @@ Required repository secrets:
 
 - Existing sample CDP/site secrets (`CUSTOMERIO_JAVA_WORKSPACE_*` on Android,
   `CUSTOMERIO_APN_WORKSPACE_*` on iOS).
-- `MOBILE_E2E_EXT_API_KEY` for backend assertions.
-- `MOBILE_E2E_APP_API_KEY` for transactional Inbox sends and remote Live
-  Notifications operations.
+- `MOBILE_E2E_APP_API_KEY` for Ext API assertions, transactional Inbox sends,
+  and remote Live Notifications operations.
 - `MOBILE_E2E_INBOX_TRANSACTIONAL_MESSAGE_ID` repository variable containing a
   published Inbox template ID for the standard and focused Inbox suites.
 

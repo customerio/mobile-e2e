@@ -53,12 +53,12 @@ fi
 if [[ "$CALLER_INBOX_MESSAGE_ID_SET" == "x" ]]; then
   INBOX_TRANSACTIONAL_MESSAGE_ID="$CALLER_INBOX_MESSAGE_ID"
 fi
-if [[ -z "${MAESTRO_EXT_API_KEY:-}" ]]; then
-  echo "warn: MAESTRO_EXT_API_KEY not set; backend assertions will fail auth" >&2
-fi
-: "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
-: "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
 : "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
+: "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
+if [[ -z "${MAESTRO_APP_API_KEY:-}" ]]; then
+  echo "warn: MAESTRO_APP_API_KEY not set; backend assertions will fail auth" >&2
+fi
+: "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
 : "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}"
 : "${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED:=false}"
 : "${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:=false}"

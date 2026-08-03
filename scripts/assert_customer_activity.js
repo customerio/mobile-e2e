@@ -3,7 +3,7 @@
 // that the sample app accepted the tap.
 //
 // Required env:
-//   MAESTRO_EXT_API_KEY   - Ext API bearer token
+//   MAESTRO_APP_API_KEY   - App API bearer token
 //   RUN_EMAIL             - unique email created by setup_run.js
 //   EXPECTED_ACTIVITY_TYPE
 //   EXPECTED_ACTIVITY_NAME - optional for types such as `geofence` that do not
@@ -33,7 +33,7 @@
         (typeof MAX_WAIT_MS === "string" && MAX_WAIT_MS) ? MAX_WAIT_MS : "30000", 10)
     var INTERVAL = parseInt(
         (typeof POLL_INTERVAL_MS === "string" && POLL_INTERVAL_MS) ? POLL_INTERVAL_MS : "750", 10)
-    var AUTH = { "Authorization": "Bearer " + MAESTRO_EXT_API_KEY }
+    var AUTH = { "Authorization": "Bearer " + MAESTRO_APP_API_KEY }
     var SINK_BASE = (typeof E2E_SINK_BASE_URL === "string" && E2E_SINK_BASE_URL.length > 0)
         ? E2E_SINK_BASE_URL.replace(/\/$/, "")
         : "http://127.0.0.1:8899"

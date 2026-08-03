@@ -47,10 +47,7 @@
         (typeof MAX_WAIT_MS === "string" && MAX_WAIT_MS) ? MAX_WAIT_MS : "90000", 10)
     var INTERVAL = parseInt(
         (typeof POLL_INTERVAL_MS === "string" && POLL_INTERVAL_MS) ? POLL_INTERVAL_MS : "1000", 10)
-    var TOKEN = (typeof MAESTRO_APP_API_KEY === "string" &&
-        MAESTRO_APP_API_KEY.length > 0)
-        ? MAESTRO_APP_API_KEY
-        : MAESTRO_EXT_API_KEY
+    var TOKEN = MAESTRO_APP_API_KEY
     var AUTH = {
         "Authorization": "Bearer " + TOKEN,
         "Content-Type": "application/json"

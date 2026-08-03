@@ -13,9 +13,10 @@ E2E_LOCAL_ENV_FILE="${E2E_ENV_FILE:-$HARNESS_DIR/.env.e2e.local}"
 CALLER_ENV_NAMES=()
 CALLER_ENV_VALUES=()
 E2E_CONFIG_VARIABLES=(
-  MAESTRO_EXT_API_BASE_URL
-  MAESTRO_EXT_API_KEY
   MAESTRO_APP_API_KEY
+  MAESTRO_EXT_API_BASE_URL
+  # Legacy local key alias. New configuration and CI use MAESTRO_APP_API_KEY.
+  MAESTRO_EXT_API_KEY
   MAESTRO_LIVE_API_BASE_URL
   MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED
   MAESTRO_INBOX_API_BASE_URL
@@ -95,7 +96,7 @@ usage() {
   printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
   printf '\nEnvironment overrides:\n'
   printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
-  printf '  MAESTRO_EXT_API_KEY, MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
+  printf '  MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
   printf '  LIVE_ACTIVITY_APP_IDENTIFIER, LIVE_NOTIFICATION_APP_IDENTIFIER,\n'
   printf '  LIVE_NOTIFICATION_DEEP_LINK, MAESTRO_INBOX_API_BASE_URL, MAESTRO_SITE_ID,\n'
   printf '  MAESTRO_INBOX_DATACENTER, MAESTRO_INBOX_CLIENT_PLATFORM,\n'
@@ -230,9 +231,9 @@ case "$SUITE" in
   live-notifications-remote) MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED=true ;;
   *) : "${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:=false}" ;;
 esac
+: "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
 : "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
 : "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
-: "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
 if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" ]]; then
   LIVE_NOTIFICATION_PLATFORM="android"
   : "${LIVE_NOTIFICATION_DEEP_LINK:=}"
@@ -379,22 +380,19 @@ validate_sample_config() {
 }
 
 validate_backend() {
-  [[ -n "${MAESTRO_EXT_API_KEY:-}" ]] || die "MAESTRO_EXT_API_KEY is missing (set it or create $ENV_FILE)"
-  if [[ "$MAESTRO_EXT_API_KEY" == *paste-* ]]; then
-    die "MAESTRO_EXT_API_KEY still contains the placeholder value"
+  [[ -n "${MAESTRO_APP_API_KEY:-}" ]] || die "MAESTRO_APP_API_KEY is missing (set it or create $ENV_FILE)"
+  if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
+    die "MAESTRO_APP_API_KEY still contains the placeholder value"
   fi
   local status
   status=$(curl -sS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
     -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $MAESTRO_EXT_API_KEY" \
+    -H "Authorization: Bearer $MAESTRO_APP_API_KEY" \
     "$MAESTRO_EXT_API_BASE_URL/customers?email=maestro-doctor-no-match%40cio.test") || true
   [[ "$status" == "200" ]] || die "Ext API preflight returned HTTP ${status:-unreachable} at $MAESTRO_EXT_API_BASE_URL"
 
   if [[ ("$FLOW_NAME" == "live_activities" && "$MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED" == "true") ||
         ("$FLOW_NAME" == "live_notifications_android" && "$MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED" == "true") ]]; then
-    if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
-      die "MAESTRO_APP_API_KEY still contains the placeholder value"
-    fi
     status=$(curl -sS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
       -o /dev/null -w '%{http_code}' \
       -H "Authorization: Bearer $MAESTRO_APP_API_KEY" \

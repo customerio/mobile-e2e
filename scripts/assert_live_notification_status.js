@@ -20,7 +20,7 @@
 //   MIN_STABLE_MS (continue polling a matching state for this duration)
 //   MAX_WAIT_MS / POLL_INTERVAL_MS
 //   MAESTRO_LIVE_API_BASE_URL / MAESTRO_EXT_API_BASE_URL
-//   MAESTRO_APP_API_KEY (falls back to MAESTRO_EXT_API_KEY)
+//   MAESTRO_APP_API_KEY
 //   E2E_SINK_BASE_URL
 
 (function () {
@@ -32,10 +32,7 @@
             ? MAESTRO_EXT_API_BASE_URL
             : "https://api.customer.io/v1")
     var BASE = rawBase.replace(/\/$/, "")
-    var TOKEN = (typeof MAESTRO_APP_API_KEY === "string" &&
-        MAESTRO_APP_API_KEY.length > 0)
-        ? MAESTRO_APP_API_KEY
-        : MAESTRO_EXT_API_KEY
+    var TOKEN = MAESTRO_APP_API_KEY
     var EXPECTED_PLATFORM_VALUE =
         (typeof EXPECTED_PLATFORM === "string" && EXPECTED_PLATFORM.length > 0)
             ? EXPECTED_PLATFORM
