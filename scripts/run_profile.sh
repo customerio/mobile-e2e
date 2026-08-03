@@ -72,7 +72,7 @@ suite_artifact_name() {
     live-notifications|live-notifications-remote) echo "live_notifications_android" ;;
     campaign) echo "campaign_141" ;;
     inline) echo "inline_messages" ;;
-    *) echo "$1" ;;
+    *) die "unknown suite '$1'" ;;
   esac
 }
 

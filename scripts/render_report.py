@@ -20,6 +20,7 @@ from pathlib import Path
 STATUS_ICON = {
     "COMPLETED": "\u2705",  # green check
     "FAILED":    "\u274C",  # red X
+    "WARNED":    "\u26A0\uFE0F",
     "SKIPPED":   "\u23ED\uFE0F",
     "PENDING":   "\u23F3",
     "RUNNING":   "\U0001F500",
@@ -27,6 +28,7 @@ STATUS_ICON = {
 STATUS_COLOR = {
     "COMPLETED": "#1f9d55",
     "FAILED":    "#cc1f1a",
+    "WARNED":    "#f2994a",
     "SKIPPED":   "#8795a1",
     "PENDING":   "#f2994a",
     "RUNNING":   "#3490dc",
@@ -294,7 +296,10 @@ def main():
         s = c.get("metadata", {}).get("status", "?")
         by_status[s] = by_status.get(s, 0) + 1
 
-    terminal_statuses = {"COMPLETED", "SKIPPED"}
+    # Maestro records an unmet optional command as WARNED while still passing
+    # the flow. Preserve the warning row without contradicting Maestro's result
+    # in the report banner.
+    terminal_statuses = {"COMPLETED", "WARNED", "SKIPPED"}
     overall_pass = bool(commands) and all(
         (c.get("metadata", {}).get("status") in terminal_statuses)
         for c in commands

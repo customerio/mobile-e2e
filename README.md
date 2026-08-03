@@ -129,9 +129,9 @@ payload must also carry `input-push-token: 1` so ActivityKit issues the
 per-instance token used by update and end.
 `MAESTRO_EXT_API_KEY` is an App API bearer token and is used for both customer
 and Live Notifications endpoints; `MAESTRO_APP_API_KEY` remains available as
-an optional override. Both variables are redacted from generated artifacts
-before reports or CI uploads. The optional app identifier is redacted too when
-it is supplied as a protected CI value.
+an optional override. API keys, workspace site IDs, and the optional app
+identifier are redacted from generated artifacts before reports or CI uploads
+whenever they are supplied as protected values.
 
 Remote-lane failures are deliberately diagnostic:
 
@@ -165,8 +165,8 @@ scripts/
   setup_run.js                 # Generates a unique run_id + email and POSTs to the
                                # sink so the HTML report shows per-run identity.
   sink.py                      # Tiny HTTP server that appends JSON POSTs to a .jsonl
-  redact_artifacts.py          # Removes exact Ext/App API keys from Maestro debug
-                               # JSON and blocks CI upload if verification fails.
+  redact_artifacts.py          # Removes exact protected keys and identifiers from
+                               # Maestro debug JSON and blocks CI upload if verification fails.
   assert_message_delivered.js  # Maestro runScript helper: polls Customer.io Ext API
                                # for a message of a given type/metric/campaign and
                                # POSTs the match (or miss) to the sink.
@@ -323,10 +323,9 @@ repo's replaceable `artifacts/e2e/<platform>/<flow>/` debugging path.
 ## Geofence workspace behavior
 
 The Android test workspace is deterministically seeded with City Hall Park
-fence `83`, so Android verifies the exact `geofence_id`. The iOS sample currently
-uses a different workspace with overlapping fences, so its default contract is
-“at least one first-class `geofence` activity after the simulated crossing.”
-Set `GEOFENCE_ID=<id>` to make iOS enforce a specific seeded fence as well.
+fence `83`. The iOS workspace is seeded with fence `3488`, which is fetched after
+the simulated move to the inside coordinate. Both defaults verify the exact
+`geofence_id`; set `GEOFENCE_ID=<id>` to target a different workspace fixture.
 
 The local Live Activities lane drives the registered Segments, Delivery, and
 Countdown examples through start, in-place update, Lock Screen rendering,

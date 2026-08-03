@@ -35,6 +35,11 @@ def main() -> int:
             "MAESTRO_EXT_API_KEY",
             "MAESTRO_APP_API_KEY",
             "LIVE_ACTIVITY_APP_IDENTIFIER",
+            "ANDROID_CDP_API_KEY",
+            "IOS_CDP_API_KEY",
+            "MAESTRO_SITE_ID",
+            "ANDROID_SITE_ID",
+            "IOS_SITE_ID",
         )
         if (value := os.environ.get(name, ""))
     }

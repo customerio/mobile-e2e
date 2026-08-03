@@ -101,7 +101,7 @@ usage() {
   printf '  MAESTRO_INBOX_DATACENTER, MAESTRO_INBOX_CLIENT_PLATFORM,\n'
   printf '  INBOX_TRANSACTIONAL_MESSAGE_ID, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
-  printf '  (GEOFENCE_ID defaults to 83 on Android and any post-move fence on iOS)\n'
+  printf '  (GEOFENCE_ID defaults to the seeded fence: 83 on Android, 3488 on iOS)\n'
 }
 
 die() {
@@ -578,13 +578,41 @@ build_and_install_ios() {
   mkdir -p "$derived"
   if [[ "$SKIP_BUILD" == 0 ]]; then
     note "building iOS SDK sample"
+    local build_result
+    set +e
     xcodebuild \
-      -project "$SAMPLE_ROOT/APN UIKit.xcodeproj" \
-      -scheme "APN UIKit" \
-      -destination "platform=iOS Simulator,id=$DEVICE_ID" \
-      -configuration Debug \
-      -derivedDataPath "$derived" \
-      build 2>&1 | tee "$ARTIFACT_DIR/build.log"
+        -project "$SAMPLE_ROOT/APN UIKit.xcodeproj" \
+        -scheme "APN UIKit" \
+        -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+        -configuration Debug \
+        -derivedDataPath "$derived" \
+        build 2>&1 | tee "$ARTIFACT_DIR/build.log"
+    build_result=${PIPESTATUS[0]}
+    set -e
+
+    # Xcode can leave workspace-state.json behind while its Swift package
+    # checkouts are absent after an interrupted resolve. Retry once with only
+    # this simulator's derived package cache cleared when that exact failure is
+    # present; unrelated build failures must still fail immediately.
+    if [[ "$build_result" -ne 0 ]] &&
+       grep -Fq "the package manifest at" "$ARTIFACT_DIR/build.log" &&
+       grep -Fq "doesn't exist in file system" "$ARTIFACT_DIR/build.log"; then
+      note "repairing incomplete iOS package cache and retrying the build once"
+      local source_packages="$derived/SourcePackages"
+      mkdir -p "$source_packages"
+      find "$source_packages" -mindepth 1 -delete
+      set +e
+      xcodebuild \
+          -project "$SAMPLE_ROOT/APN UIKit.xcodeproj" \
+          -scheme "APN UIKit" \
+          -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+          -configuration Debug \
+          -derivedDataPath "$derived" \
+          build 2>&1 | tee -a "$ARTIFACT_DIR/build.log"
+      build_result=${PIPESTATUS[0]}
+      set -e
+    fi
+    [[ "$build_result" -eq 0 ]] || return "$build_result"
   fi
   [[ -d "$app" ]] || die "iOS sample app is missing: $app"
   # A reinstall gives every run fresh app storage. Location permission is

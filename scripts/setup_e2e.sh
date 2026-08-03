@@ -51,7 +51,7 @@ check_platform() {
   set +e
   "$HARNESS_DIR/e2e" doctor \
     --platform "$target_platform" \
-    --suite message-inbox \
+    --suite smoke \
     --sdk-repo "$repo"
   local result=$?
   set -e
