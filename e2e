@@ -1,0 +1,722 @@
+#!/usr/bin/env bash
+# One-command Customer.io mobile SDK E2E runner.
+# Owns prerequisites, virtual device, sample build/install, Maestro, backend
+# assertions, and diagnostic artifacts for either native SDK.
+
+set -euo pipefail
+
+HARNESS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Optional shared local configuration. Values supplied by the calling shell win
+# over this file; the file in turn wins over per-sample .maestro/.env files.
+E2E_LOCAL_ENV_FILE="${E2E_ENV_FILE:-$HARNESS_DIR/.env.e2e.local}"
+CALLER_ENV_NAMES=()
+CALLER_ENV_VALUES=()
+E2E_CONFIG_VARIABLES=(
+  MAESTRO_APP_API_KEY
+  MAESTRO_EXT_API_BASE_URL
+  # Legacy local key alias. New configuration and CI use MAESTRO_APP_API_KEY.
+  MAESTRO_EXT_API_KEY
+  MAESTRO_LIVE_API_BASE_URL
+  MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED
+  MAESTRO_INBOX_API_BASE_URL
+  MAESTRO_SITE_ID
+  MAESTRO_INBOX_DATACENTER
+  MAESTRO_INBOX_CLIENT_PLATFORM
+  INBOX_TRANSACTIONAL_MESSAGE_ID
+  LIVE_ACTIVITY_APP_IDENTIFIER
+  LIVE_NOTIFICATION_APP_IDENTIFIER
+  LIVE_NOTIFICATION_DEEP_LINK
+  ANDROID_SDK_REPO
+  IOS_SDK_REPO
+  ANDROID_AVD_NAME
+  IOS_SIMULATOR_NAME
+  DEVELOPER_DIR
+  GEOFENCE_OUTSIDE_LATITUDE
+  GEOFENCE_OUTSIDE_LONGITUDE
+  GEOFENCE_INSIDE_LATITUDE
+  GEOFENCE_INSIDE_LONGITUDE
+  GEOFENCE_ID
+  ANDROID_CDP_API_KEY
+  ANDROID_SITE_ID
+  IOS_CDP_API_KEY
+  IOS_SITE_ID
+  E2E_WORKSPACE_NAME
+)
+
+for config_name in "${E2E_CONFIG_VARIABLES[@]}"; do
+  if printenv "$config_name" >/dev/null 2>&1; then
+    CALLER_ENV_NAMES+=("$config_name")
+    CALLER_ENV_VALUES+=("${!config_name}")
+  fi
+done
+if [[ -f "$E2E_LOCAL_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$E2E_LOCAL_ENV_FILE"
+  set +a
+fi
+for config_index in "${!CALLER_ENV_NAMES[@]}"; do
+  export "${CALLER_ENV_NAMES[$config_index]}=${CALLER_ENV_VALUES[$config_index]}"
+done
+
+# Profile orchestration is intentionally a thin wrapper around this single-flow
+# runner, so focused runs and profile runs always exercise the exact same path.
+if [[ "${1:-}" == "test" ]]; then
+  shift
+  exec bash "$HARNESS_DIR/scripts/run_profile.sh" "$@"
+elif [[ "${1:-}" == "setup" ]]; then
+  shift
+  exec bash "$HARNESS_DIR/scripts/setup_e2e.sh" "$@"
+fi
+
+COMMAND="run"
+PLATFORM=""
+SUITE="smoke"
+FLOW=""
+SDK_REPO=""
+SKIP_BUILD=0
+KEEP_DEVICE=0
+HEADLESS=0
+SKIP_DOCTOR=0
+STARTED_DEVICE=0
+DEVICE_ID=""
+ANDROID_SERIAL=""
+ARTIFACT_DIR=""
+
+usage() {
+  printf '%s\n' 'Customer.io mobile SDK end-to-end runner.'
+  printf '\nUsage:\n'
+  printf '  ./e2e setup [--platform all|android|ios] [--android-sdk-repo PATH] [--ios-sdk-repo PATH]\n'
+  printf '  ./e2e test [--profile quick|standard|all|remote] [--platform all|android|ios]\n'
+  printf '             [--suite NAME] [--android-sdk-repo PATH] [--ios-sdk-repo PATH]\n'
+  printf '             [--keep-device] [--headless]\n'
+  printf '  ./e2e doctor --platform android|ios [--sdk-repo PATH]\n'
+  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|message-inbox|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
+  printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
+  printf '\nEnvironment overrides:\n'
+  printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
+  printf '  MAESTRO_APP_API_KEY, MAESTRO_LIVE_API_BASE_URL,\n'
+  printf '  LIVE_ACTIVITY_APP_IDENTIFIER, LIVE_NOTIFICATION_APP_IDENTIFIER,\n'
+  printf '  LIVE_NOTIFICATION_DEEP_LINK, MAESTRO_INBOX_API_BASE_URL, MAESTRO_SITE_ID,\n'
+  printf '  MAESTRO_INBOX_DATACENTER, MAESTRO_INBOX_CLIENT_PLATFORM,\n'
+  printf '  INBOX_TRANSACTIONAL_MESSAGE_ID, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
+  printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
+  printf '  (GEOFENCE_ID defaults to the seeded fence: 83 on Android, 3488 on iOS)\n'
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 2
+}
+
+note() {
+  echo ">> $*"
+}
+
+if [[ $# -gt 0 && ("$1" == "run" || "$1" == "doctor") ]]; then
+  COMMAND="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --platform) PLATFORM="${2:-}"; shift 2 ;;
+    --suite) SUITE="${2:-}"; shift 2 ;;
+    --flow) FLOW="${2:-}"; shift 2 ;;
+    --sdk-repo) SDK_REPO="${2:-}"; shift 2 ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    --skip-doctor) SKIP_DOCTOR=1; shift ;;
+    --keep-device) KEEP_DEVICE=1; shift ;;
+    --headless) HEADLESS=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+
+case "$PLATFORM" in
+  android|Android|ANDROID) PLATFORM="android" ;;
+  ios|iOS|IOS) PLATFORM="ios" ;;
+  *) die "--platform must be android or ios" ;;
+esac
+
+if [[ -z "$FLOW" ]]; then
+  case "$SUITE" in
+    smoke) FLOW="smoke_login_event.yaml" ;;
+    geofence) FLOW="geofence_basic.yaml" ;;
+    campaign) FLOW="campaign_141.yaml" ;;
+    inline) FLOW="inline_messages.yaml" ;;
+    message-inbox|inbox) FLOW="message_inbox.yaml" ;;
+    live-activities|live-activities-remote) FLOW="live_activities.yaml" ;;
+    live-notifications|live-notifications-remote) FLOW="live_notifications_android.yaml" ;;
+    *) die "unknown suite '$SUITE'" ;;
+  esac
+fi
+
+FLOW_BASENAME="$(basename "$FLOW")"
+if [[ "$FLOW_BASENAME" == "live_activities.yaml" && "$PLATFORM" != "ios" ]]; then
+  die "the live activities flow requires --platform ios"
+fi
+if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" && "$PLATFORM" != "android" ]]; then
+  die "the Android live notifications flow requires --platform android"
+fi
+
+if [[ -z "$SDK_REPO" && "$PLATFORM" == "android" ]]; then
+  if [[ -n "${ANDROID_SDK_REPO:-}" ]]; then
+    SDK_REPO="$ANDROID_SDK_REPO"
+  elif [[ -x "$PWD/gradlew" ]]; then
+    SDK_REPO="$PWD"
+  fi
+elif [[ -z "$SDK_REPO" && "$PLATFORM" == "ios" ]]; then
+  if [[ -n "${IOS_SDK_REPO:-}" ]]; then
+    SDK_REPO="$IOS_SDK_REPO"
+  elif [[ -f "$PWD/Apps/APN-UIKit/APN UIKit.xcodeproj/project.pbxproj" ]]; then
+    SDK_REPO="$PWD"
+  fi
+fi
+if [[ -z "$SDK_REPO" ]]; then
+  if [[ "$PLATFORM" == "android" ]]; then
+    die "SDK repo is not configured; pass --sdk-repo or set ANDROID_SDK_REPO"
+  else
+    die "SDK repo is not configured; pass --sdk-repo or set IOS_SDK_REPO"
+  fi
+fi
+SDK_REPO="$(cd "$SDK_REPO" 2>/dev/null && pwd)" || die "SDK repo does not exist: $SDK_REPO"
+
+if [[ "$PLATFORM" == "android" ]]; then
+  SAMPLE_ROOT="$SDK_REPO"
+  SAMPLE_MAESTRO_DIR="$SDK_REPO/.maestro"
+  APP_ID="io.customer.android.sample.java_layout"
+  CONFIG_FILE="$SDK_REPO/samples/local.properties"
+else
+  SAMPLE_ROOT="$SDK_REPO/Apps/APN-UIKit"
+  SAMPLE_MAESTRO_DIR="$SAMPLE_ROOT/.maestro"
+  APP_ID="io.customer.ios-sample.apn-spm.APN-UIKit"
+  CONFIG_FILE="$SAMPLE_ROOT/BuildEnvironment.swift"
+  : "${DEVELOPER_DIR:=/Applications/Xcode.app/Contents/Developer}"
+  export DEVELOPER_DIR
+fi
+
+ENV_FILE="$SAMPLE_MAESTRO_DIR/.env"
+ACTIVE_OVERRIDE_NAMES=()
+ACTIVE_OVERRIDE_VALUES=()
+for config_name in "${E2E_CONFIG_VARIABLES[@]}"; do
+  if printenv "$config_name" >/dev/null 2>&1; then
+    ACTIVE_OVERRIDE_NAMES+=("$config_name")
+    ACTIVE_OVERRIDE_VALUES+=("${!config_name}")
+  fi
+done
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+for config_index in "${!ACTIVE_OVERRIDE_NAMES[@]}"; do
+  export "${ACTIVE_OVERRIDE_NAMES[$config_index]}=${ACTIVE_OVERRIDE_VALUES[$config_index]}"
+done
+case "$SUITE" in
+  live-activities)
+    MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=false
+    : "${MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED:=false}"
+    ;;
+  live-activities-remote)
+    MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED=true
+    MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED=true
+    ;;
+  *) : "${MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED:=false}" ;;
+esac
+case "$SUITE" in
+  live-notifications) MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED=false ;;
+  live-notifications-remote) MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED=true ;;
+  *) : "${MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED:=false}" ;;
+esac
+: "${MAESTRO_APP_API_KEY:=${MAESTRO_EXT_API_KEY:-}}"
+: "${MAESTRO_EXT_API_BASE_URL:=https://api.customer.io/v1}"
+: "${MAESTRO_LIVE_API_BASE_URL:=$MAESTRO_EXT_API_BASE_URL}"
+if [[ "$FLOW_BASENAME" == "live_notifications_android.yaml" ]]; then
+  LIVE_NOTIFICATION_PLATFORM="android"
+  : "${LIVE_NOTIFICATION_DEEP_LINK:=}"
+else
+  : "${LIVE_NOTIFICATION_PLATFORM:=ios}"
+  : "${LIVE_NOTIFICATION_DEEP_LINK:=apn-uikit://live-activities}"
+fi
+: "${LIVE_NOTIFICATION_APP_IDENTIFIER:=${LIVE_ACTIVITY_APP_IDENTIFIER:-}}"
+export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL
+export MAESTRO_APP_API_KEY MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED
+export MAESTRO_LIVE_ACTIVITY_DEVICE_BACKEND_ENABLED
+export MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED LIVE_NOTIFICATION_PLATFORM
+export LIVE_NOTIFICATION_APP_IDENTIFIER LIVE_NOTIFICATION_DEEP_LINK
+
+validate_generated_config_value() {
+  local name="$1"
+  local value="$2"
+  if [[ "$value" == *$'\n'* || "$value" == *'"'* || "$value" == *'&'* || "$value" == *'\'* ]]; then
+    die "$name contains an unsupported newline, quote, ampersand, or backslash"
+  fi
+}
+
+configure_sample_from_shared_env() {
+  local workspace_name="${E2E_WORKSPACE_NAME:-Mobile E2E}"
+  if [[ "$PLATFORM" == "android" && -n "${ANDROID_CDP_API_KEY:-}" && -n "${ANDROID_SITE_ID:-}" ]]; then
+    validate_generated_config_value "ANDROID_CDP_API_KEY" "$ANDROID_CDP_API_KEY"
+    validate_generated_config_value "ANDROID_SITE_ID" "$ANDROID_SITE_ID"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    [[ -f "$CONFIG_FILE" ]] || : >"$CONFIG_FILE"
+    local android_tmp
+    android_tmp="$(mktemp "${TMPDIR:-/tmp}/cio-android-e2e-config.XXXXXX")"
+    awk -v cdp="$ANDROID_CDP_API_KEY" -v site="$ANDROID_SITE_ID" '
+      BEGIN { cdp_written = 0; site_written = 0 }
+      /^[[:space:]]*cdpApiKey[[:space:]]*=/ {
+        if (!cdp_written) print "cdpApiKey=" cdp
+        cdp_written = 1
+        next
+      }
+      /^[[:space:]]*siteId[[:space:]]*=/ {
+        if (!site_written) print "siteId=" site
+        site_written = 1
+        next
+      }
+      { print }
+      END {
+        if (!site_written) print "siteId=" site
+        if (!cdp_written) print "cdpApiKey=" cdp
+      }
+    ' "$CONFIG_FILE" >"$android_tmp"
+    mv "$android_tmp" "$CONFIG_FILE"
+  elif [[ "$PLATFORM" == "ios" && -n "${IOS_CDP_API_KEY:-}" && -n "${IOS_SITE_ID:-}" ]]; then
+    validate_generated_config_value "IOS_CDP_API_KEY" "$IOS_CDP_API_KEY"
+    validate_generated_config_value "IOS_SITE_ID" "$IOS_SITE_ID"
+    validate_generated_config_value "E2E_WORKSPACE_NAME" "$workspace_name"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+      cp "$SAMPLE_ROOT/BuildEnvironment.sample.swift" "$CONFIG_FILE"
+    fi
+    local ios_tmp
+    ios_tmp="$(mktemp "${TMPDIR:-/tmp}/cio-ios-e2e-config.XXXXXX")"
+    awk -v cdp="$IOS_CDP_API_KEY" -v site="$IOS_SITE_ID" -v workspace="$workspace_name" '
+      /static let cdpApiKey:/ {
+        sub(/"[^"]*"/, "\"" cdp "\"")
+      }
+      /static let siteId:/ {
+        sub(/"[^"]*"/, "\"" site "\"")
+      }
+      /static let workspaceName:/ {
+        sub(/"[^"]*"/, "\"" workspace "\"")
+      }
+      { print }
+    ' "$CONFIG_FILE" >"$ios_tmp"
+    mv "$ios_tmp" "$CONFIG_FILE"
+  fi
+}
+
+configure_sample_from_shared_env
+
+resolve_sample_site_id() {
+  if [[ "$PLATFORM" == "android" ]]; then
+    sed -nE \
+      's/^[[:space:]]*(javaLayout_)?siteId[[:space:]]*=[[:space:]]*([^[:space:]#]+).*/\2/p' \
+      "$CONFIG_FILE" | head -1
+  else
+    sed -nE 's/.*siteId[^=]*=[[:space:]]*"([^"]+)".*/\1/p' "$CONFIG_FILE" | head -1
+  fi
+}
+
+if [[ "$FLOW_BASENAME" == "message_inbox.yaml" ]]; then
+  : "${MAESTRO_SITE_ID:=$(resolve_sample_site_id)}"
+  [[ -n "$MAESTRO_SITE_ID" ]] || die "could not resolve the sample siteId for Message Inbox assertions"
+  : "${MAESTRO_INBOX_API_BASE_URL:=https://consumer.inapp.customer.io}"
+  : "${MAESTRO_INBOX_DATACENTER:=US}"
+  if [[ "$PLATFORM" == "android" ]]; then
+    : "${MAESTRO_INBOX_CLIENT_PLATFORM:=android-android}"
+  else
+    : "${MAESTRO_INBOX_CLIENT_PLATFORM:=ios-apple}"
+  fi
+  : "${INBOX_TRANSACTIONAL_MESSAGE_ID:=}"
+  [[ -n "$INBOX_TRANSACTIONAL_MESSAGE_ID" ]] \
+    || die "INBOX_TRANSACTIONAL_MESSAGE_ID is required for the Message Inbox suite"
+  export MAESTRO_SITE_ID MAESTRO_INBOX_API_BASE_URL MAESTRO_INBOX_DATACENTER MAESTRO_INBOX_CLIENT_PLATFORM
+  export INBOX_TRANSACTIONAL_MESSAGE_ID
+fi
+
+FLOW_NAME="$(basename "$FLOW" .yaml)"
+ARTIFACT_DIR="$SDK_REPO/artifacts/e2e/$PLATFORM/$FLOW_NAME"
+mkdir -p "$ARTIFACT_DIR"
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command '$1' is not installed"
+}
+
+resolve_android_emulator() {
+  local candidates=(
+    "${ANDROID_SDK_ROOT:-}/emulator/emulator"
+    "${ANDROID_HOME:-}/emulator/emulator"
+    "$HOME/Library/Android/sdk/emulator/emulator"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ "$candidate" != "/emulator/emulator" && -x "$candidate" ]]; then
+      echo "$candidate"
+      return
+    fi
+  done
+  return 1
+}
+
+validate_sample_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "sample configuration is missing: $CONFIG_FILE"
+  if [[ "$PLATFORM" == "android" ]]; then
+    grep -Eq '^[[:space:]]*(javaLayout_)?cdpApiKey[[:space:]]*=[[:space:]]*[^[:space:]]+' "$CONFIG_FILE" \
+      || grep -Eq '^[[:space:]]*cdpApiKey[[:space:]]*=[[:space:]]*[^[:space:]]+' "$CONFIG_FILE" \
+      || die "Android sample cdpApiKey is not configured"
+    grep -Eq '^[[:space:]]*(javaLayout_)?siteId[[:space:]]*=[[:space:]]*[^[:space:]]+' "$CONFIG_FILE" \
+      || grep -Eq '^[[:space:]]*siteId[[:space:]]*=[[:space:]]*[^[:space:]]+' "$CONFIG_FILE" \
+      || die "Android sample siteId is not configured"
+  else
+    grep -Eq 'cdpApiKey[^=]*=[[:space:]]*"[^\"]+"' "$CONFIG_FILE" \
+      || die "iOS sample cdpApiKey is not configured"
+    grep -Eq 'siteId[^=]*=[[:space:]]*"[^\"]+"' "$CONFIG_FILE" \
+      || die "iOS sample siteId is not configured"
+  fi
+}
+
+validate_backend() {
+  [[ -n "${MAESTRO_APP_API_KEY:-}" ]] || die "MAESTRO_APP_API_KEY is missing (set it or create $ENV_FILE)"
+  if [[ "$MAESTRO_APP_API_KEY" == *paste-* ]]; then
+    die "MAESTRO_APP_API_KEY still contains the placeholder value"
+  fi
+  local status
+  status=$(curl -sS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+    -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $MAESTRO_APP_API_KEY" \
+    "$MAESTRO_EXT_API_BASE_URL/customers?email=maestro-doctor-no-match%40cio.test") || true
+  [[ "$status" == "200" ]] || die "Ext API preflight returned HTTP ${status:-unreachable} at $MAESTRO_EXT_API_BASE_URL"
+
+  if [[ ("$FLOW_NAME" == "live_activities" && "$MAESTRO_LIVE_ACTIVITY_REMOTE_ENABLED" == "true") ||
+        ("$FLOW_NAME" == "live_notifications_android" && "$MAESTRO_LIVE_NOTIFICATION_REMOTE_ENABLED" == "true") ]]; then
+    status=$(curl -sS --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+      -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $MAESTRO_APP_API_KEY" \
+      "$MAESTRO_LIVE_API_BASE_URL/live_notifications/01ARZ3NDEKTSV4RRFFQ69G5FAV") || true
+    [[ "$status" == "200" || "$status" == "400" || "$status" == "404" ]] \
+      || die "Live Notifications App API preflight returned HTTP ${status:-unreachable} at $MAESTRO_LIVE_API_BASE_URL"
+  fi
+}
+
+doctor() {
+  require_command maestro
+  require_command curl
+  require_command python3
+  require_command ffmpeg
+  if ! python3 -c 'from PIL import Image' >/dev/null 2>&1; then
+    echo "warn: Python Pillow is not installed; annotated video rendering will be skipped" >&2
+  fi
+  [[ -f "$HARNESS_DIR/flows/$FLOW" || -f "$SAMPLE_MAESTRO_DIR/$FLOW" ]] \
+    || die "flow '$FLOW' was not found"
+  validate_sample_config
+  validate_backend
+
+  if [[ "$PLATFORM" == "android" ]]; then
+    require_command adb
+    [[ -x "$SDK_REPO/gradlew" ]] || die "Gradle wrapper is missing or not executable"
+    resolve_android_emulator >/dev/null || die "Android emulator binary was not found"
+  else
+    require_command xcrun
+    require_command xcodebuild
+    [[ -d "$DEVELOPER_DIR" ]] || die "Xcode developer directory does not exist: $DEVELOPER_DIR"
+    [[ -f "$SAMPLE_ROOT/APN UIKit.xcodeproj/project.pbxproj" ]] || die "APN-UIKit Xcode project is missing"
+  fi
+  note "doctor passed for $PLATFORM"
+  note "SDK repo: $SDK_REPO"
+  note "backend: $MAESTRO_EXT_API_BASE_URL"
+}
+
+wait_for_android_boot() {
+  local deadline=$((SECONDS + 240))
+  while (( SECONDS < deadline )); do
+    ANDROID_SERIAL=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
+    if [[ -n "$ANDROID_SERIAL" ]] && \
+       [[ "$(adb -s "$ANDROID_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+      adb -s "$ANDROID_SERIAL" shell input keyevent 82 >/dev/null 2>&1 || true
+      adb -s "$ANDROID_SERIAL" shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+      sleep 5
+      DEVICE_ID="$ANDROID_SERIAL"
+      return
+    fi
+    sleep 2
+  done
+  die "Android emulator did not finish booting; see $ARTIFACT_DIR/emulator.log"
+}
+
+start_android_device() {
+  require_command adb
+  local existing
+  existing=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
+  if [[ -n "$existing" ]]; then
+    ANDROID_SERIAL="$existing"
+    DEVICE_ID="$existing"
+    note "reusing Android emulator $existing"
+    wait_for_android_boot
+    return
+  fi
+
+  local emulator_bin avd_name
+  emulator_bin=$(resolve_android_emulator) || die "Android emulator binary was not found"
+  avd_name="${ANDROID_AVD_NAME:-Maestro_ANDROID_pixel_7_android-35}"
+  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
+    note "creating and starting Maestro Android virtual device"
+    maestro start-device --platform android --device-model pixel_7 --device-os android-35 \
+      >"$ARTIFACT_DIR/start-device.log" 2>&1 \
+      || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+    local started
+    started=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
+    if [[ -n "$started" ]]; then
+      ANDROID_SERIAL="$started"
+      DEVICE_ID="$started"
+      STARTED_DEVICE=1
+      wait_for_android_boot
+      return
+    fi
+  fi
+  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
+    avd_name=$("$emulator_bin" -list-avds | awk '/^Maestro_ANDROID_/ {print; exit}')
+  fi
+  [[ -n "$avd_name" ]] || die "Maestro did not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+
+  local emulator_args=(-avd "$avd_name" -no-snapshot-load -no-snapshot-save -no-boot-anim -noaudio)
+  if [[ "$HEADLESS" == 1 || -n "${CI:-}" ]]; then
+    emulator_args+=(-no-window -gpu swiftshader_indirect)
+  fi
+  note "starting Android virtual device $avd_name"
+  nohup "$emulator_bin" "${emulator_args[@]}" >"$ARTIFACT_DIR/emulator.log" 2>&1 </dev/null &
+  disown "$!" 2>/dev/null || true
+  STARTED_DEVICE=1
+  wait_for_android_boot
+}
+
+find_ios_device() {
+  local preferred="${IOS_SIMULATOR_NAME:-}"
+  xcrun simctl list devices available -j | jq -r --arg preferred "$preferred" '
+    [.devices[][] | select(.isAvailable == true) | select(.name | startswith("iPhone"))] as $phones |
+    if $preferred != "" then
+      (($phones | map(select(.name == $preferred)))[0].udid // empty)
+    else
+      ((($phones | map(select(.name == "Maestro iPhone 17 Pro")))[0] //
+        ($phones | map(select(.name == "iPhone 17 Pro")))[0] //
+        $phones[0]).udid // empty)
+    end'
+}
+
+start_ios_device() {
+  require_command jq
+  local booted
+  booted=$(xcrun simctl list devices booted -j | jq -r \
+    '[.devices[][] | select(.state == "Booted") | select(.name | startswith("iPhone"))][0].udid // empty')
+  if [[ -n "$booted" ]]; then
+    DEVICE_ID="$booted"
+    if [[ "$KEEP_DEVICE" == 0 ]]; then
+      # Repeated XCUITest sessions can leave Simulator's text-input service in
+      # a state where Maestro reports inputText success but drops the value.
+      # A normal run favors determinism; --keep-device intentionally preserves
+      # the faster iteration behavior and the current visual state.
+      note "restarting iOS Simulator $booted for a clean automation session"
+      xcrun simctl shutdown "$booted"
+      xcrun simctl boot "$booted"
+      xcrun simctl bootstatus "$booted" -b
+    fi
+    note "reusing iOS Simulator $booted"
+    return
+  fi
+
+  local selected
+  selected=$(find_ios_device)
+  if [[ -z "$selected" ]]; then
+    if [[ -n "${IOS_SIMULATOR_NAME:-}" ]]; then
+      die "requested iOS Simulator '$IOS_SIMULATOR_NAME' was not found"
+    fi
+    die "no available iPhone simulator was found; install an iOS runtime in Xcode"
+  fi
+  [[ -n "$selected" ]] || die "no compatible iOS Simulator is available"
+  xcrun simctl boot "$selected" 2>/dev/null || true
+  xcrun simctl bootstatus "$selected" -b
+  DEVICE_ID="$selected"
+  STARTED_DEVICE=1
+  if [[ "$HEADLESS" == 0 && -z "${CI:-}" ]]; then
+    open -a Simulator --args -CurrentDeviceUDID "$DEVICE_ID" >/dev/null 2>&1 || true
+  fi
+  note "started iOS Simulator $DEVICE_ID"
+}
+
+cleanup_device() {
+  if [[ "$STARTED_DEVICE" == 0 || "$KEEP_DEVICE" == 1 ]]; then
+    return
+  fi
+  if [[ "$PLATFORM" == "android" && -n "$ANDROID_SERIAL" ]]; then
+    adb -s "$ANDROID_SERIAL" emu kill >/dev/null 2>&1 || true
+  elif [[ "$PLATFORM" == "ios" && -n "$DEVICE_ID" ]]; then
+    xcrun simctl shutdown "$DEVICE_ID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_device EXIT
+
+build_and_install_android() {
+  local apk="$SDK_REPO/samples/java_layout/build/outputs/apk/debug/java_layout-debug.apk"
+  if [[ "$SKIP_BUILD" == 0 ]]; then
+    note "building Android SDK sample"
+    (cd "$SDK_REPO" && ./gradlew :samples:java_layout:assembleDebug) \
+      2>&1 | tee "$ARTIFACT_DIR/build.log"
+  fi
+  [[ -f "$apk" ]] || die "Android sample APK is missing: $apk"
+  note "installing Android sample on $ANDROID_SERIAL"
+  adb -s "$ANDROID_SERIAL" install -r "$apk" >"$ARTIFACT_DIR/install.log"
+}
+
+build_and_install_ios() {
+  local derived="${TMPDIR:-/tmp}/customerio-mobile-e2e/ios-$DEVICE_ID"
+  local app="$derived/Build/Products/Debug-iphonesimulator/APN UIKit.app"
+  mkdir -p "$derived"
+  if [[ "$SKIP_BUILD" == 0 ]]; then
+    note "building iOS SDK sample"
+    local build_result
+    set +e
+    xcodebuild \
+        -project "$SAMPLE_ROOT/APN UIKit.xcodeproj" \
+        -scheme "APN UIKit" \
+        -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+        -configuration Debug \
+        -derivedDataPath "$derived" \
+        build 2>&1 | tee "$ARTIFACT_DIR/build.log"
+    build_result=${PIPESTATUS[0]}
+    set -e
+
+    # Xcode can leave workspace-state.json behind while its Swift package
+    # checkouts are absent after an interrupted resolve. Retry once with only
+    # this simulator's derived package cache cleared when that exact failure is
+    # present; unrelated build failures must still fail immediately.
+    if [[ "$build_result" -ne 0 ]] &&
+       grep -Fq "the package manifest at" "$ARTIFACT_DIR/build.log" &&
+       grep -Fq "doesn't exist in file system" "$ARTIFACT_DIR/build.log"; then
+      note "repairing incomplete iOS package cache and retrying the build once"
+      local source_packages="$derived/SourcePackages"
+      mkdir -p "$source_packages"
+      find "$source_packages" -mindepth 1 -delete
+      set +e
+      xcodebuild \
+          -project "$SAMPLE_ROOT/APN UIKit.xcodeproj" \
+          -scheme "APN UIKit" \
+          -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+          -configuration Debug \
+          -derivedDataPath "$derived" \
+          build 2>&1 | tee -a "$ARTIFACT_DIR/build.log"
+      build_result=${PIPESTATUS[0]}
+      set -e
+    fi
+    [[ "$build_result" -eq 0 ]] || return "$build_result"
+  fi
+  [[ -d "$app" ]] || die "iOS sample app is missing: $app"
+  # A reinstall gives every run fresh app storage. Location permission is
+  # granted afterwards so the flow itself does not need to clear it again.
+  : >"$ARTIFACT_DIR/install.log"
+  xcrun simctl uninstall "$DEVICE_ID" "$APP_ID" >>"$ARTIFACT_DIR/install.log" 2>&1 || true
+  note "installing iOS sample on $DEVICE_ID"
+  local attempt
+  for attempt in 1 2 3; do
+    if xcrun simctl install "$DEVICE_ID" "$app" >>"$ARTIFACT_DIR/install.log" 2>&1; then
+      return
+    fi
+    note "iOS install attempt $attempt failed; waiting for CoreSimulator"
+    xcrun simctl bootstatus "$DEVICE_ID" -b >>"$ARTIFACT_DIR/install.log" 2>&1 || true
+    sleep 2
+  done
+  die "could not install the iOS sample; see $ARTIFACT_DIR/install.log"
+}
+
+prepare_geofence_permissions() {
+  if [[ "$FLOW" != "geofence_basic.yaml" ]]; then
+    return 0
+  fi
+  note "preparing deterministic Always location permission"
+  if [[ "$PLATFORM" == "android" ]]; then
+    adb -s "$ANDROID_SERIAL" shell pm clear "$APP_ID" >/dev/null
+    adb -s "$ANDROID_SERIAL" shell pm grant "$APP_ID" android.permission.ACCESS_COARSE_LOCATION
+    adb -s "$ANDROID_SERIAL" shell pm grant "$APP_ID" android.permission.ACCESS_FINE_LOCATION
+    adb -s "$ANDROID_SERIAL" shell pm grant "$APP_ID" android.permission.ACCESS_BACKGROUND_LOCATION
+    adb -s "$ANDROID_SERIAL" shell dumpsys package "$APP_ID" \
+      | grep -E 'ACCESS_(COARSE|FINE|BACKGROUND)_LOCATION: granted=' \
+      >"$ARTIFACT_DIR/location-permissions.log" || true
+  else
+    xcrun simctl privacy "$DEVICE_ID" grant location-always "$APP_ID"
+  fi
+}
+
+prepare_live_notification_permissions() {
+  if [[ "$FLOW" != "live_notifications_android.yaml" ]]; then
+    return 0
+  fi
+  note "resetting Android app data and granting notification permission"
+  adb -s "$ANDROID_SERIAL" shell pm clear "$APP_ID" >/dev/null
+  adb -s "$ANDROID_SERIAL" shell pm grant "$APP_ID" android.permission.POST_NOTIFICATIONS
+  adb -s "$ANDROID_SERIAL" shell dumpsys package "$APP_ID" \
+    | grep -E 'POST_NOTIFICATIONS: granted=' \
+    >"$ARTIFACT_DIR/notification-permissions.log" || true
+}
+
+collect_device_logs() {
+  if [[ "$PLATFORM" == "android" ]]; then
+    adb -s "$ANDROID_SERIAL" logcat -d \
+      'CustomerIO:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
+      >"$ARTIFACT_DIR/device.log" 2>&1 || true
+  else
+    xcrun simctl spawn "$DEVICE_ID" log show --last 20m --style compact \
+      --predicate 'process == "APN UIKit" OR subsystem CONTAINS "customer"' \
+      >"$ARTIFACT_DIR/device.log" 2>&1 || true
+  fi
+}
+
+run_e2e() {
+  local runner_platform
+  if [[ "$SKIP_DOCTOR" == 0 ]]; then
+    doctor
+  fi
+  if [[ "$PLATFORM" == "android" ]]; then
+    start_android_device
+    build_and_install_android
+    adb -s "$ANDROID_SERIAL" logcat -c || true
+    runner_platform="Android"
+  else
+    start_ios_device
+    build_and_install_ios
+    runner_platform="iOS"
+  fi
+  prepare_geofence_permissions
+  prepare_live_notification_permissions
+
+  export APP_ID HARNESS_DIR SAMPLE_MAESTRO_DIR
+  export E2E_DEVICE_ID="$DEVICE_ID"
+  export E2E_ARTIFACTS_DIR="$ARTIFACT_DIR"
+  export E2E_NO_OPEN=1
+  export E2E_ENV_PRELOADED=true
+  note "running $FLOW on $DEVICE_ID"
+  set +e
+  (cd "$SAMPLE_ROOT" && PLATFORM="$runner_platform" bash "$HARNESS_DIR/run.sh" "$FLOW")
+  local result=$?
+  set -e
+  collect_device_logs
+  if ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$ARTIFACT_DIR" ||
+     ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" --check "$ARTIFACT_DIR"; then
+    echo "error: failed to sanitize final E2E artifacts" >&2
+    result=1
+  fi
+  note "artifacts: $ARTIFACT_DIR"
+  if [[ "$result" -ne 0 ]]; then
+    echo "error: E2E flow failed with exit $result" >&2
+  else
+    note "E2E flow passed"
+  fi
+  return "$result"
+}
+
+if [[ "$COMMAND" == "doctor" ]]; then
+  doctor
+else
+  run_e2e
+fi

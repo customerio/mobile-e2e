@@ -151,6 +151,7 @@ def render_panel_frame(
     t_s: float,
     steps: list[dict],
     sink_events: list[dict],
+    title: str,
     w: int,
     h: int,
     f_h1,
@@ -163,7 +164,7 @@ def render_panel_frame(
 
     # Header.
     d.rectangle([(0, 0), (w, 70)], fill=(26, 32, 44))
-    d.text((20, 16), "Maestro E2E \u2014 Campaign 141", font=f_h1, fill=(255, 255, 255))
+    d.text((20, 16), f"Maestro E2E \u2014 {title}", font=f_h1, fill=(255, 255, 255))
     d.text((20, 44), f"t = {t_s:5.1f}s", font=f_small, fill=(160, 174, 192))
 
     # Find current step: first where start_s <= t <= end_s; if none, latest before t.
@@ -264,6 +265,7 @@ def main():
     ap.add_argument("--device", required=True)
     ap.add_argument("--rec-started-ms", required=True, type=int)
     ap.add_argument("--sink", default=None)
+    ap.add_argument("--title", default="SDK flow")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -319,7 +321,10 @@ def main():
         frame_count = int(duration * FPS) + 1
         for f in range(frame_count):
             t_s = f / FPS
-            img = render_panel_frame(t_s, steps, sink_events, panel_w, panel_h, f_h1, f_body, f_small, f_mono)
+            img = render_panel_frame(
+                t_s, steps, sink_events, args.title,
+                panel_w, panel_h, f_h1, f_body, f_small, f_mono,
+            )
             img.save(td_p / f"p_{f:05d}.png")
 
         # Build the final video: hstack device + panel sequence.

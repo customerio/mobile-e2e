@@ -6,7 +6,7 @@ the actual backend values (message_id, metrics, campaign) in the report,
 instead of just a pass/fail tick.
 
 Usage:
-    sink.py <out_jsonl> [--port 8899]
+    sink.py <out_jsonl> [--port 0] [--port-file <path>]
 
 Each POST is appended to <out_jsonl> as one JSON line, with the server's
 receive timestamp merged in as `received_at_ms`.
@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -48,13 +49,16 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("--port", type=int, default=8899)
+    ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--port-file")
     args = ap.parse_args()
 
     open(args.out, "w").close()  # truncate
     srv = HTTPServer(("127.0.0.1", args.port), Handler)
     srv.out_path = args.out
-    print(f"sink listening on 127.0.0.1:{args.port} -> {args.out}", flush=True)
+    if args.port_file:
+        Path(args.port_file).write_text(str(srv.server_port))
+    print(f"sink listening on 127.0.0.1:{srv.server_port} -> {args.out}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

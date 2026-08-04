@@ -123,7 +123,6 @@ name: E2E — Campaign 141 full loop with real push delivery
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
-      MAESTRO_EXT_API_KEY: ${MAESTRO_EXT_API_KEY}
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "in_app"
       MIN_METRIC: "sent"

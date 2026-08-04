@@ -1,8 +1,8 @@
 // Waits up to MAX_WAIT_MS for a message of EXPECTED_TYPE to appear for
-// RUN_EMAIL with the MIN_METRIC populated. Polls Customer.io Ext API.
+// RUN_EMAIL with the MIN_METRIC populated. Polls the Customer.io Ext API.
 //
 // Required env (passed via runScript.env):
-//   MAESTRO_EXT_API_KEY  - Bearer token for api.customer.io
+//   MAESTRO_APP_API_KEY  - Bearer token for api.customer.io
 //   RUN_EMAIL            - Customer email (unique per test run)
 //   EXPECTED_TYPE        - in_app | push | email | slack
 //
@@ -10,6 +10,7 @@
 //   MIN_METRIC           - "sent" (default) | "delivered" | "drafted" | "opened" | ...
 //   MAX_WAIT_MS          - "20000" ms total budget
 //   POLL_INTERVAL_MS     - "750" ms between attempts (busy-wait; no Thread.sleep available)
+//   EXPECTED_MESSAGE_ID  - exact delivery/message id returned by a send API
 //
 // Always sets:
 //   output.assert_ok      - "true" | "false"
@@ -26,17 +27,23 @@
 //   output.messages_seen  (JSON string; last observation)
 
 (function () {
-    var BASE = "https://api.customer.io/v1"
+    var BASE = (typeof MAESTRO_EXT_API_BASE_URL === "string" && MAESTRO_EXT_API_BASE_URL.length > 0)
+        ? MAESTRO_EXT_API_BASE_URL.replace(/\/$/, "")
+        : "https://api.customer.io/v1"
     var TYPE = EXPECTED_TYPE
     var MIN = (typeof MIN_METRIC === "string" && MIN_METRIC.length > 0) ? MIN_METRIC : "sent"
     var MAX = parseInt(
         (typeof MAX_WAIT_MS === "string" && MAX_WAIT_MS) ? MAX_WAIT_MS : "20000", 10)
     var INTERVAL = parseInt(
         (typeof POLL_INTERVAL_MS === "string" && POLL_INTERVAL_MS) ? POLL_INTERVAL_MS : "750", 10)
-    var AUTH = { "Authorization": "Bearer " + MAESTRO_EXT_API_KEY }
+    var AUTH = { "Authorization": "Bearer " + MAESTRO_APP_API_KEY }
     // Local sink for surfacing backend values in the rendered HTML report.
-    var SINK = "http://127.0.0.1:8899/assert"
+    var SINK_BASE = (typeof E2E_SINK_BASE_URL === "string" && E2E_SINK_BASE_URL.length > 0)
+        ? E2E_SINK_BASE_URL.replace(/\/$/, "")
+        : "http://127.0.0.1:8899"
+    var SINK = SINK_BASE + "/assert"
     var CAMP = (typeof CAMPAIGN_ID === "string") ? CAMPAIGN_ID : ""
+    var MESSAGE_ID = (typeof EXPECTED_MESSAGE_ID === "string") ? EXPECTED_MESSAGE_ID : ""
 
     output.assert_ok = "false"
     output.assert_reason = ""
@@ -47,6 +54,7 @@
             payload.expected_type = TYPE
             payload.min_metric = MIN
             payload.campaign_filter = CAMP
+            payload.message_id_filter = MESSAGE_ID
             payload.run_email = RUN_EMAIL
             http.post(SINK, { body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } })
         } catch (_) { /* sink not running; non-fatal */ }
@@ -100,7 +108,9 @@
                     var m = messages[i]
                     var metrics = m.metrics || {}
                     if (i < 10) seen.push({ type: m.type, campaign_id: m.campaign_id, metrics: Object.keys(metrics) })
-                    if (m.type === TYPE && metrics[MIN] && (!CAMP || String(m.campaign_id) === CAMP)) {
+                    if (m.type === TYPE && metrics[MIN] &&
+                        (!CAMP || String(m.campaign_id) === CAMP) &&
+                        (!MESSAGE_ID || String(m.id) === MESSAGE_ID)) {
                         output.assert_ok = "true"
                         output.assert_reason = "matched_after_" + attempts + "_attempts"
                         output.message_id = m.id

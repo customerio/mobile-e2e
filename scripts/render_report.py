@@ -14,11 +14,13 @@ import os
 import re
 import sys
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 STATUS_ICON = {
     "COMPLETED": "\u2705",  # green check
     "FAILED":    "\u274C",  # red X
+    "WARNED":    "\u26A0\uFE0F",
     "SKIPPED":   "\u23ED\uFE0F",
     "PENDING":   "\u23F3",
     "RUNNING":   "\U0001F500",
@@ -26,6 +28,7 @@ STATUS_ICON = {
 STATUS_COLOR = {
     "COMPLETED": "#1f9d55",
     "FAILED":    "#cc1f1a",
+    "WARNED":    "#f2994a",
     "SKIPPED":   "#8795a1",
     "PENDING":   "#f2994a",
     "RUNNING":   "#3490dc",
@@ -115,7 +118,16 @@ def phase_for(verb: str, detail: str) -> str:
         return "Welcome modal (C55)"
     if "send custom event" in d or "event name" in d or "property" in d or "send event" in d or d == "maestro_test" or "c141_02" in d or "c141_03" in d:
         return "Fire event (maestro_test)"
-    if verb == "runScript" and "expected_type" in d or "assert_message_delivered" in d or "min_metric" in d:
+    if verb == "runScript" and any(
+        marker in d
+        for marker in (
+            "expected_type",
+            "assert_message_delivered",
+            "min_metric",
+            "assert_customer_activity",
+            "customer activity",
+        )
+    ):
         return "Backend assertions"
     if verb == "assertTrue" and "assert_ok" in d:
         return "Backend assertions"
@@ -139,9 +151,21 @@ def load_script_enrichment(commands: list, debug_dir: Path) -> dict[int, dict]:
         env = rs.get("env") or {}
         if "EXPECTED_TYPE" in env:
             out[i] = {
+                "kind": "message",
                 "type": env.get("EXPECTED_TYPE"),
                 "metric": env.get("MIN_METRIC", "sent"),
                 "campaign": env.get("CAMPAIGN_ID"),
+                "max_wait_ms": env.get("MAX_WAIT_MS"),
+            }
+        elif "EXPECTED_ACTIVITY_TYPE" in env:
+            out[i] = {
+                "kind": "activity",
+                "type": env.get("EXPECTED_ACTIVITY_TYPE"),
+                "name": env.get("EXPECTED_ACTIVITY_NAME"),
+                "property": env.get("EXPECTED_PROPERTY_NAME"),
+                "property_value": env.get("EXPECTED_PROPERTY_VALUE"),
+                "property_2": env.get("EXPECTED_PROPERTY_NAME_2"),
+                "property_value_2": env.get("EXPECTED_PROPERTY_VALUE_2"),
                 "max_wait_ms": env.get("MAX_WAIT_MS"),
             }
     return out
@@ -224,25 +248,42 @@ def main():
             except Exception:
                 continue
     setup_event = next((e for e in sink_events if e.get("kind") == "setup"), None)
-    assert_events = [e for e in sink_events if e.get("kind") == "assert_message"]
+    assert_events = [
+        e for e in sink_events
+        if e.get("kind") in ("assert_message", "assert_activity")
+    ]
 
     def match_sink_for_runscript(cmd_timestamp_ms: int, script_env: dict) -> dict | None:
         """Match a runScript step to the assert event it most likely produced."""
         if not assert_events or not script_env:
             return None
+        want_kind = script_env.get("kind")
         want_type = script_env.get("type")
-        want_metric = script_env.get("metric")
-        want_camp = script_env.get("campaign") or ""
         # Find the first event whose received_at falls after this command started
         # and whose filters match.
         best = None
         for ev in assert_events:
+            if ev.get("kind") != "assert_" + want_kind:
+                continue
             if ev.get("expected_type") != want_type:
                 continue
-            if ev.get("min_metric") != want_metric:
-                continue
-            if want_camp and str(ev.get("campaign_filter") or "") != str(want_camp):
-                continue
+            if want_kind == "message":
+                if ev.get("min_metric") != script_env.get("metric"):
+                    continue
+                want_camp = script_env.get("campaign") or ""
+                if want_camp and str(ev.get("campaign_filter") or "") != str(want_camp):
+                    continue
+            else:
+                if str(ev.get("expected_name") or "") != str(script_env.get("name") or ""):
+                    continue
+                if str(ev.get("expected_property") or "") != str(script_env.get("property") or ""):
+                    continue
+                if str(ev.get("expected_property_value") or "") != str(script_env.get("property_value") or ""):
+                    continue
+                if str(ev.get("expected_property_2") or "") != str(script_env.get("property_2") or ""):
+                    continue
+                if str(ev.get("expected_property_value_2") or "") != str(script_env.get("property_value_2") or ""):
+                    continue
             if ev.get("received_at_ms", 0) < cmd_timestamp_ms:
                 continue
             if best is None or ev["received_at_ms"] < best["received_at_ms"]:
@@ -255,7 +296,14 @@ def main():
         s = c.get("metadata", {}).get("status", "?")
         by_status[s] = by_status.get(s, 0) + 1
 
-    overall_pass = by_status.get("FAILED", 0) == 0
+    # Maestro records an unmet optional command as WARNED while still passing
+    # the flow. Preserve the warning row without contradicting Maestro's result
+    # in the report banner.
+    terminal_statuses = {"COMPLETED", "WARNED", "SKIPPED"}
+    overall_pass = bool(commands) and all(
+        (c.get("metadata", {}).get("status") in terminal_statuses)
+        for c in commands
+    )
     first_ts = commands[0].get("metadata", {}).get("timestamp")
     last = commands[-1].get("metadata", {})
     last_ts = (last.get("timestamp") or 0) + (last.get("duration") or 0)
@@ -307,6 +355,7 @@ def main():
     # Render HTML
     banner_color = "#1f9d55" if overall_pass else "#cc1f1a"
     banner_text = "\u2705 PASSED" if overall_pass else "\u274C FAILED"
+    safe_title = escape(args.title)
 
     phases_in_order = []
     seen = set()
@@ -328,18 +377,32 @@ def main():
         for s in phase_steps:
             icon = STATUS_ICON.get(s["status"], "?")
             color = STATUS_COLOR.get(s["status"], "#333")
-            safe_detail = (s["detail"] or "").replace("<", "&lt;").replace(">", "&gt;")
+            safe_detail = escape(s["detail"] or "")
             dur = f'{s["duration_ms"]/1000:.2f}s' if s["duration_ms"] else "&mdash;"
             extra = ""
             if s["script_env"]:
                 env = s["script_env"]
                 extra = (
                     f'<div class="script-detail">'
-                    f'<span class="tag">type: <b>{env.get("type")}</b></span> '
-                    f'<span class="tag">metric \u2265 <b>{env.get("metric")}</b></span> '
+                    f'<span class="tag">type: <b>{escape(str(env.get("type") or ""))}</b></span> '
                 )
-                if env.get("campaign"):
-                    extra += f'<span class="tag">campaign: <b>{env.get("campaign")}</b></span> '
+                if env.get("kind") == "message":
+                    extra += f'<span class="tag">metric \u2265 <b>{escape(str(env.get("metric") or ""))}</b></span> '
+                    if env.get("campaign"):
+                        extra += f'<span class="tag">campaign: <b>{escape(str(env.get("campaign")))}</b></span> '
+                else:
+                    if env.get("name"):
+                        extra += f'<span class="tag">name: <b>{escape(str(env.get("name")))}</b></span> '
+                    if env.get("property"):
+                        extra += (
+                            f'<span class="tag">{escape(str(env.get("property")))}: '
+                            f'<b>{escape(str(env.get("property_value") or ""))}</b></span> '
+                        )
+                    if env.get("property_2"):
+                        extra += (
+                            f'<span class="tag">{escape(str(env.get("property_2")))}: '
+                            f'<b>{escape(str(env.get("property_value_2") or ""))}</b></span> '
+                        )
                 if env.get("max_wait_ms"):
                     extra += f'<span class="tag muted">budget: {int(env["max_wait_ms"])/1000:.0f}s</span>'
                 extra += '</div>'
@@ -354,34 +417,53 @@ def main():
                     result_label = ("\u2705 matched" if ok else "\u274C no match") + f" after {sm.get('attempts')} attempts ({int(sm.get('elapsed_ms', 0))}ms)"
                     rows_html = [f'<div class="backend-row"><span class="k">result</span><span class="v">{result_label}</span></div>']
                     if ok:
-                        metrics_obj = sm.get("metrics") or {}
-                        metric_chips = " ".join(
-                            f'<span class="metric-chip">{k}: {v}</span>'
-                            for k, v in metrics_obj.items()
-                        )
-                        rows_html.append(
-                            f'<div class="backend-row"><span class="k">message_id</span>'
-                            f'<span class="v mono">{sm.get("message_id")}</span></div>'
-                        )
-                        rows_html.append(
-                            f'<div class="backend-row"><span class="k">campaign_id</span>'
-                            f'<span class="v mono">{sm.get("campaign_id")}</span>'
-                            f'<span class="k">template</span><span class="v mono">{sm.get("msg_template_id")}</span></div>'
-                        )
-                        rows_html.append(
-                            f'<div class="backend-row"><span class="k">metrics</span>'
-                            f'<span class="v">{metric_chips}</span></div>'
-                        )
+                        if env.get("kind") == "message":
+                            metrics_obj = sm.get("metrics") or {}
+                            metric_chips = " ".join(
+                                f'<span class="metric-chip">{escape(str(k))}: {escape(str(v))}</span>'
+                                for k, v in metrics_obj.items()
+                            )
+                            rows_html.append(
+                                f'<div class="backend-row"><span class="k">message_id</span>'
+                                f'<span class="v mono">{escape(str(sm.get("message_id") or ""))}</span></div>'
+                            )
+                            rows_html.append(
+                                f'<div class="backend-row"><span class="k">campaign_id</span>'
+                                f'<span class="v mono">{escape(str(sm.get("campaign_id") or ""))}</span>'
+                                f'<span class="k">template</span><span class="v mono">{escape(str(sm.get("msg_template_id") or ""))}</span></div>'
+                            )
+                            rows_html.append(
+                                f'<div class="backend-row"><span class="k">metrics</span>'
+                                f'<span class="v">{metric_chips}</span></div>'
+                            )
+                        else:
+                            rows_html.append(
+                                f'<div class="backend-row"><span class="k">activity_id</span>'
+                                f'<span class="v mono">{escape(str(sm.get("activity_id") or ""))}</span></div>'
+                            )
+                            activity_label = escape(str(sm.get("activity_type") or ""))
+                            if sm.get("activity_name"):
+                                activity_label += " / " + escape(str(sm.get("activity_name")))
+                            rows_html.append(
+                                f'<div class="backend-row"><span class="k">activity</span>'
+                                f'<span class="v mono">{activity_label}</span>'
+                                f'<span class="k">timestamp</span><span class="v mono">{escape(str(sm.get("activity_timestamp") or ""))}</span></div>'
+                            )
+                            activity_json = escape(json.dumps(sm.get("activity_data") or {}, indent=2))
+                            rows_html.append(
+                                f'<details class="backend-row"><summary>activity data</summary>'
+                                f'<pre class="mono">{activity_json}</pre></details>'
+                            )
                     else:
                         rows_html.append(
                             f'<div class="backend-row"><span class="k">reason</span>'
-                            f'<span class="v mono">{sm.get("reason")}</span></div>'
+                            f'<span class="v mono">{escape(str(sm.get("reason") or ""))}</span></div>'
                         )
-                        seen = sm.get("messages_seen")
-                        if seen:
-                            seen_json = json.dumps(seen, indent=2).replace("<", "&lt;")
+                        server_seen = sm.get("messages_seen") or sm.get("activities_seen")
+                        if server_seen:
+                            seen_json = escape(json.dumps(server_seen, indent=2))
                             rows_html.append(
-                                f'<details class="backend-row"><summary>messages seen on server</summary>'
+                                f'<details class="backend-row"><summary>records seen on server</summary>'
                                 f'<pre class="mono">{seen_json}</pre></details>'
                             )
                     extra += (
@@ -392,7 +474,7 @@ def main():
                     )
             err_html = ""
             if s["error"]:
-                err_msg = s["error"].replace("<", "&lt;").replace(">", "&gt;")
+                err_msg = escape(s["error"])
                 err_html = f'<div class="error">{err_msg}</div>'
             shot_html = ""
             if s["screenshot"]:
@@ -431,8 +513,8 @@ def main():
     if setup_event:
         setup_banner = (
             f'<div class="setup-banner">'
-            f'<span class="k">test run</span><span class="v">{setup_event.get("run_id", "")}</span> &nbsp; '
-            f'<span class="k">customer email</span><span class="v">{setup_event.get("email", "")}</span>'
+            f'<span class="k">test run</span><span class="v">{escape(str(setup_event.get("run_id", "")))}</span> &nbsp; '
+            f'<span class="k">customer email</span><span class="v">{escape(str(setup_event.get("email", "")))}</span>'
             f'</div>'
         )
 
@@ -440,7 +522,7 @@ def main():
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{args.title}</title>
+<title>{safe_title}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background:#f5f7fa; color:#1a202c; }}
 header {{ padding: 24px 32px; background: {banner_color}; color: white; }}
@@ -484,7 +566,7 @@ video {{ max-width: 100%; max-height: 560px; background:#000; border-radius:4px;
 </head>
 <body>
 <header>
-  <h1>{args.title} &mdash; {banner_text}</h1>
+  <h1>{safe_title} &mdash; {banner_text}</h1>
   <div class="sub">Started {started} &middot; Duration {duration_ms/1000:.1f}s</div>
 </header>
 <div class="summary">

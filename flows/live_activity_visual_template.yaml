@@ -1,0 +1,188 @@
+appId: ${APP_ID}
+---
+# Parameterized local visual acceptance flow for one registered ActivityKit type.
+# The parent supplies stable sample-app identifiers and the exact user-facing
+# strings expected before/after the update and on the Lock Screen.
+
+- scrollUntilVisible:
+    element:
+      id: "live_activity_${LIVE_ACTIVITY_KIND}_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_${LIVE_ACTIVITY_KIND}_toggle"
+    retryTapIfNoChange: true
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*${LIVE_ACTIVITY_KIND} state=active ${LIVE_ACTIVITY_STATE_FIELD}=${LIVE_ACTIVITY_START_TEXT}.*"
+    timeout: 15000
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_01_start
+
+# Exactly one activity of this type must exist, and the update below must keep
+# both ActivityKit's id and Customer.io's correlation id unchanged.
+- copyTextFrom:
+    id: "live_activity_system_status"
+- runScript:
+    file: ../scripts/capture_live_activity_id.js
+    env:
+      LIVE_ACTIVITY_KIND: ${LIVE_ACTIVITY_KIND}
+- assertTrue: ${output.capture_live_id_ok === "true"}
+- assertTrue: ${output.live_activity_kind_count === "1"}
+- evalScript: ${output.visual_start_activitykit_id = output.live_activitykit_id}
+- evalScript: ${output.visual_start_instance_id = output.live_instance_id}
+
+- scrollUntilVisible:
+    element:
+      id: "live_activity_${LIVE_ACTIVITY_KIND}_update"
+    direction: DOWN
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_${LIVE_ACTIVITY_KIND}_update"
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*${LIVE_ACTIVITY_KIND} state=active ${LIVE_ACTIVITY_STATE_FIELD}=${LIVE_ACTIVITY_UPDATE_TEXT}.*"
+    timeout: 15000
+- copyTextFrom:
+    id: "live_activity_system_status"
+- runScript:
+    file: ../scripts/capture_live_activity_id.js
+    env:
+      LIVE_ACTIVITY_KIND: ${LIVE_ACTIVITY_KIND}
+- assertTrue: ${output.capture_live_id_ok === "true"}
+- assertTrue: ${output.live_activity_kind_count === "1"}
+- assertTrue: ${output.live_activitykit_id === output.visual_start_activitykit_id}
+- assertTrue: ${output.live_instance_id === output.visual_start_instance_id}
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_02_update
+
+# `pressKey: Lock` exposes the full system-owned Lock Screen presentation while
+# the original screen retains the local handle needed for the end operation.
+- pressKey: Lock
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*${LIVE_ACTIVITY_LOCK_SCREEN_TEXT}.*"
+    timeout: 15000
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+# The follow-up system sheet is intentionally delayed on Simulator and can
+# appear just after Maestro's first visibility probe completes.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "2000"
+- runFlow:
+    when:
+      visible: "Always Allow"
+    commands:
+      - tapOn: "Always Allow"
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*${LIVE_ACTIVITY_LOCK_SCREEN_TEXT}.*"
+    timeout: 15000
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_03_lock_screen
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_04_app_return
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+    timeout: 15000
+
+# Finish through the SDK and require ActivityKit to expose the final content.
+- scrollUntilVisible:
+    element:
+      id: "live_activity_${LIVE_ACTIVITY_KIND}_toggle"
+    direction: DOWN
+    timeout: 15000
+    centerElement: false
+- tapOn:
+    id: "live_activity_${LIVE_ACTIVITY_KIND}_toggle"
+    retryTapIfNoChange: true
+- scrollUntilVisible:
+    element:
+      id: "live_activity_system_status"
+    direction: UP
+    timeout: 15000
+    centerElement: true
+- extendedWaitUntil:
+    visible:
+      id: "live_activity_system_status"
+      text: "(?s).*(${LIVE_ACTIVITY_KIND} state=ended ${LIVE_ACTIVITY_STATE_FIELD}=${LIVE_ACTIVITY_END_TEXT}|no activities).*"
+    timeout: 20000
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_05_end
+
+# Prove the system kept the final state after ActivityKit ended the activity.
+# Dismiss the ended card before the parent starts another template; otherwise
+# iOS can foreground the old card over the next active one.
+- pressKey: Lock
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*${LIVE_ACTIVITY_END_TEXT}.*"
+    timeout: 15000
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "2000"
+- runFlow:
+    when:
+      visible: "Always Allow"
+    commands:
+      - tapOn: "Always Allow"
+- waitForAnimationToEnd:
+    timeout: 2000
+- extendedWaitUntil:
+    visible: ".*${LIVE_ACTIVITY_END_TEXT}.*"
+    timeout: 15000
+- takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_06_end_lock_screen
+- swipe:
+    # The compact card sits in the bottom fifth of this fixed Simulator. Keep
+    # the dismissal gesture inside its body so it cannot hit the empty area.
+    start: "90%,82%"
+    end: "10%,82%"
+    duration: 600
+- swipe:
+    start: "50%,92%"
+    end: "50%,20%"
+    duration: 600
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "Live Activities"
+    timeout: 30000
