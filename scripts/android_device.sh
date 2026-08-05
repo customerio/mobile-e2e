@@ -58,6 +58,16 @@ create_headless_android_avd() {
   local create_log="$3"
   local avdmanager_bin abi system_image avd_home
 
+  avd_home="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+  mkdir -p "$avd_home"
+  export ANDROID_AVD_HOME="$avd_home"
+  if [[ -e "$avd_home/$expected_avd_name.ini" ||
+        -e "$avd_home/$expected_avd_name.avd" ]]; then
+    printf 'Stale AVD registration found at %s but the emulator did not list it; refusing to overwrite it. Remove or rename the stale path, or set ANDROID_AVD_NAME.\n' \
+      "$avd_home/$expected_avd_name" >"$create_log"
+    return 1
+  fi
+
   avdmanager_bin=$(resolve_android_avdmanager || true)
   [[ -n "$avdmanager_bin" ]] || {
     echo "Android avdmanager was not found on PATH or under the configured SDK" >"$create_log"
@@ -69,9 +79,6 @@ create_headless_android_avd() {
     return 1
   }
   system_image="system-images;android-35;google_apis;$abi"
-  avd_home="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-  mkdir -p "$avd_home"
-  export ANDROID_AVD_HOME="$avd_home"
 
   note "creating Android virtual device for headless execution"
   printf 'avdmanager: %s\nANDROID_AVD_HOME: %s\nsystem image: %s\n' \
@@ -172,7 +179,9 @@ preserve_android_transport_failure() {
   mkdir -p "$retry_dir"
   find "$retry_dir" -mindepth 1 -delete
   cp -R "$artifact_dir/debug" "$retry_dir/debug"
-  for diagnostic in run.log report.xml report.html sink.stderr; do
+  for diagnostic in \
+    run.log report.xml report.html sink.stderr sink.jsonl \
+    sdk-live.log device-live.log; do
     if [[ -f "$artifact_dir/$diagnostic" ]]; then
       cp "$artifact_dir/$diagnostic" "$retry_dir/$diagnostic"
     fi
@@ -183,6 +192,8 @@ run_android_transport_recovery_once() {
   local initial_result="$1"
   local artifact_dir="$2"
   local device_id="$3"
+  local recovery_attempt_was_set="${E2E_RECOVERY_ATTEMPT+x}"
+  local recovery_attempt_value="${E2E_RECOVERY_ATTEMPT:-}"
   shift 3
 
   [[ "$initial_result" -ne 0 ]] || return 0
@@ -193,5 +204,21 @@ run_android_transport_recovery_once() {
     note "Android device did not reconnect; preserving the original Maestro failure"
     return "$initial_result"
   fi
+  local retry_result
+  export E2E_RECOVERY_ATTEMPT=1
   "$@"
+  retry_result=$?
+  if [[ "$recovery_attempt_was_set" == x ]]; then
+    export E2E_RECOVERY_ATTEMPT="$recovery_attempt_value"
+  else
+    unset E2E_RECOVERY_ATTEMPT
+  fi
+  if [[ "$retry_result" -eq 0 ]]; then
+    printf '\nRecovered from an Android device transport failure after reconnecting and retrying once. The first attempt is in device-recovery-attempt-1/.\n' \
+      >>"$artifact_dir/run.log"
+  else
+    printf '\nRetried after an Android device transport failure, but the retry also failed with exit %s. The first attempt is in device-recovery-attempt-1/.\n' \
+      "$retry_result" >>"$artifact_dir/run.log"
+  fi
+  return "$retry_result"
 }

@@ -1,7 +1,7 @@
 appId: ${APP_ID}
 tags:
   - message-inbox
-name: Message Inbox — backend, SDK data API, visual presentations, actions
+name: Message Inbox — backend, startup hydration, SDK data API, visual presentations, actions
 ---
 # Shared iOS/Android Inbox flow. INBOX_TRANSACTIONAL_MESSAGE_ID must reference
 # an active visual Inbox template (cio_inbox* topic and basic/image/cta type).
@@ -80,11 +80,13 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
 - assertTrue: ${output.assert_ok === "true"}
 
 # The Gist queue is scoped to a process-level session id. The first iOS session
-# starts before this transactional message exists, and inbox.getMessages() only
-# reads the SDK's current local state. Restart the process without clearing app
-# data after the backend confirms the delivery: the sample restores the same
-# persisted SDK identity, Gist creates a new session id, and normal SDK startup
-# fetches the existing delivery without creating another customer or message.
+# starts before this transactional message exists, inbox.getMessages() only
+# reads the SDK's current local state, and polling defaults to 600 seconds when
+# SSE is disabled. Immediate same-session refresh is therefore not part of this
+# suite's contract. Restart without clearing data to explicitly validate cold-
+# start hydration: the sample restores the same persisted SDK identity, Gist
+# creates a new session id, and startup fetches the existing delivery without
+# creating another customer or message.
 - runFlow:
     when:
       platform: iOS

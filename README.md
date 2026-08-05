@@ -281,6 +281,12 @@ Jist dismiss action, and proves queue removal. The template must contain a
 `cio_inbox*` topic and `type` equal to `basic`, `image`, or `cta`; the pre-render
 queue assertion fails explicitly when the fixture is incompatible.
 
+On iOS, the data-API portion explicitly validates cold-start hydration after
+the backend delivery. `inbox.getMessages()` reads local SDK state and the
+non-SSE polling interval defaults to 600 seconds, so the suite does not claim
+immediate same-session refresh coverage. Android currently reaches the same
+assertions without a process restart.
+
 ## CI
 
 Both native SDK repos contain a `Maestro SDK E2E` workflow using the same
@@ -324,6 +330,9 @@ Profile runs archive immutable evidence beneath
 `mobile-e2e/artifacts/e2e/profile-<timestamp>/<platform>/<flow>/`; the summary
 links to those snapshots. Focused low-level runs continue to use the selected SDK
 repo's replaceable `artifacts/e2e/<platform>/<flow>/` debugging path.
+Each flow also retains a sanitized live SDK log: `sdk-live.log` on iOS and
+`device-live.log` on Android. These capture SDK/network lifecycle diagnostics
+that post-run system log queries can miss.
 
 ## Geofence workspace behavior
 

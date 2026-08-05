@@ -506,10 +506,9 @@ find_ios_device() {
 
 start_ios_device() {
   require_command jq
-  local booted selected
-  booted=$(xcrun simctl list devices booted -j | jq -r \
-    '[.devices[][] | select(.state == "Booted") |
-      select((.name | startswith("iPhone")) or (.name | startswith("Maestro iPhone")))][0].udid // empty')
+  local booted selected booted_devices
+  booted_devices=$(xcrun simctl list devices booted -j)
+  booted=$(printf '%s' "$booted_devices" | select_booted_ios_device)
   if [[ -n "$booted" && "$KEEP_DEVICE" == 1 ]]; then
     DEVICE_ID="$booted"
     note "reusing iOS Simulator $booted"
@@ -525,19 +524,16 @@ start_ios_device() {
   fi
   [[ -n "$selected" ]] || die "no compatible iOS Simulator is available"
 
-  if [[ -n "$booted" && "$booted" == "$selected" ]]; then
-    DEVICE_ID="$booted"
+  if printf '%s' "$booted_devices" | ios_device_is_booted "$selected"; then
+    DEVICE_ID="$selected"
     # Repeated XCUITest sessions can leave Simulator's text-input service in a
     # state where Maestro reports inputText success but drops the value.
-    note "restarting iOS Simulator $booted for a clean automation session"
-    xcrun simctl shutdown "$booted"
-    xcrun simctl boot "$booted"
-    xcrun simctl bootstatus "$booted" -b
-    note "reusing iOS Simulator $booted"
+    note "restarting iOS Simulator $selected for a clean automation session"
+    xcrun simctl shutdown "$selected"
+    xcrun simctl boot "$selected"
+    xcrun simctl bootstatus "$selected" -b
+    note "reusing iOS Simulator $selected"
     return
-  elif [[ -n "$booted" ]]; then
-    note "shutting down non-selected iOS Simulator $booted"
-    xcrun simctl shutdown "$booted" >/dev/null 2>&1 || true
   fi
 
   xcrun simctl boot "$selected" 2>/dev/null || true

@@ -2,6 +2,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -32,9 +33,7 @@ class RenderReportArtifactDiscoveryTests(unittest.TestCase):
     def test_finds_latest_maestro_2_failure_screenshot(self):
         with tempfile.TemporaryDirectory() as directory:
             debug = Path(directory)
-            earlier = (
-                debug / "Message Inbox" / "screenshots" / "step-015-tap.png"
-            )
+            earlier = debug / "Message Inbox" / "screenshots" / "step-5-tap.png"
             expected = debug / "Message Inbox" / "screenshots" / "step-038.png"
             expected.parent.mkdir(parents=True)
             earlier.write_bytes(b"png")
@@ -46,6 +45,31 @@ class RenderReportArtifactDiscoveryTests(unittest.TestCase):
             os.utime(expected, (same_timestamp, same_timestamp))
 
             self.assertEqual(render_report.find_failure_screenshot(debug), expected)
+
+    def test_passing_report_surfaces_warnings_without_failure_screen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            debug = root / "debug"
+            flow = debug / "Smoke"
+            screenshots = flow / "screenshots"
+            screenshots.mkdir(parents=True)
+            (flow / "commands.json").write_text(
+                '[{"metadata":{"status":"WARNED","timestamp":1000,"duration":10},"command":{}}]'
+            )
+            (screenshots / "step-1.png").write_bytes(b"png")
+            output = root / "report.html"
+
+            with mock.patch.object(
+                render_report.sys,
+                "argv",
+                ["render_report.py", str(debug), str(output)],
+            ):
+                self.assertEqual(render_report.main(), None)
+
+            html = output.read_text()
+            self.assertIn('<span>warned</span>', html)
+            self.assertIn('>1</b><span>warned</span>', html)
+            self.assertNotIn("Screen at failure", html)
 
 
 if __name__ == "__main__":

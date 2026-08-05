@@ -203,12 +203,17 @@ def find_failure_screenshot(debug_dir: Path) -> Path | None:
     if not candidates:
         return None
 
+    def sort_key(path: Path) -> tuple[int, int, str]:
+        step_match = re.search(r"step-(\d+)", path.name)
+        step_number = int(step_match.group(1)) if step_match else -1
+        return path.stat().st_mtime_ns, step_number, path.as_posix()
+
     # A failing run can contain screenshots for earlier recovered commands.
-    # Prefer the newest file and use its path as a deterministic tie-breaker
-    # when an extracted archive gives every image the same timestamp.
+    # Prefer the newest file and then the highest numeric step when an
+    # extracted archive gives every image the same timestamp.
     return max(
         set(candidates),
-        key=lambda path: (path.stat().st_mtime_ns, path.as_posix()),
+        key=sort_key,
     )
 
 
@@ -513,7 +518,7 @@ def main():
         html_steps.append('</ol>')
 
     fail_block = ""
-    if fail_screenshot:
+    if not overall_pass and fail_screenshot:
         fail_block = (
             f'<section class="card"><h2>Screen at failure</h2>'
             f'<img class="failshot" src="{fail_screenshot}"></section>'
@@ -527,6 +532,7 @@ def main():
 
     pass_count = by_status.get("COMPLETED", 0)
     fail_count = by_status.get("FAILED", 0)
+    warn_count = by_status.get("WARNED", 0)
     skip_count = by_status.get("SKIPPED", 0)
 
     setup_banner = ""
@@ -593,6 +599,7 @@ video {{ max-width: 100%; max-height: 560px; background:#000; border-radius:4px;
   <div class="stat"><b>{total}</b><span>total</span></div>
   <div class="stat" style="background:#f0fff4"><b style="color:#1f9d55">{pass_count}</b><span>passed</span></div>
   <div class="stat" style="background:#fff5f5"><b style="color:#cc1f1a">{fail_count}</b><span>failed</span></div>
+  <div class="stat" style="background:#fffaf0"><b style="color:#dd6b20">{warn_count}</b><span>warned</span></div>
   <div class="stat" style="background:#f7fafc"><b style="color:#718096">{skip_count}</b><span>skipped</span></div>
 </div>
 <main>

@@ -87,6 +87,22 @@ selected=$(printf '%s' "$GENERIC_FALLBACK_JSON" | select_ios_device "")
   exit 1
 }
 
+MULTI_BOOTED_JSON='{
+  "devices": {
+    "com.apple.CoreSimulator.SimRuntime.iOS-26-2": [
+      {"name":"iPhone 16 Pro","udid":"first-booted","state":"Booted"},
+      {"name":"iPhone 17 Pro","udid":"selected-booted","state":"Booted"}
+    ]
+  }
+}'
+booted=$(printf '%s' "$MULTI_BOOTED_JSON" | select_booted_ios_device)
+[[ "$booted" == "first-booted" ]]
+printf '%s' "$MULTI_BOOTED_JSON" | ios_device_is_booted "selected-booted"
+if printf '%s' "$MULTI_BOOTED_JSON" | ios_device_is_booted "not-booted"; then
+  echo "expected an unknown simulator not to be classified as booted" >&2
+  exit 1
+fi
+
 IOS_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mobile-e2e-ios-device.XXXXXX")"
 cleanup_test_dir() {
   find "$IOS_TEST_DIR" -mindepth 1 -delete
@@ -175,17 +191,49 @@ note() {
   NOTES+="$*"$'\n'
 }
 RETRY_CALLS=0
+RETRY_RESULT=0
 retry_command() {
   RETRY_CALLS=$((RETRY_CALLS + 1))
-  return 0
+  # Mirror run.sh's top-level cleanup gate: a nested retry must retain the
+  # first-attempt bundle that the recovery wrapper just captured.
+  if [[ "${E2E_RECOVERY_ATTEMPT:-0}" != 1 ]]; then
+    find "$IOS_TEST_DIR/driver-recovery-attempt-1" -mindepth 1 -delete
+    rmdir "$IOS_TEST_DIR/driver-recovery-attempt-1"
+  fi
+  [[ -d "$IOS_TEST_DIR/driver-recovery-attempt-1" ]] || return 65
+  return "$RETRY_RESULT"
 }
 printf '%s\n' 'IOSDriverTimeoutException: iOS driver not ready in time' \
   >"$IOS_TEST_DIR/debug/maestro.log"
 printf '%s\n' 'first attempt output' >"$IOS_TEST_DIR/run.log"
+printf '%s\n' 'first live SDK diagnostics' >"$IOS_TEST_DIR/sdk-live.log"
 run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
 [[ "$RETRY_CALLS" -eq 1 ]]
 [[ -f "$IOS_TEST_DIR/driver-recovery-attempt-1/debug/maestro.log" ]]
 grep -Fq 'first attempt output' "$IOS_TEST_DIR/driver-recovery-attempt-1/run.log"
+grep -Fq 'first live SDK diagnostics' \
+  "$IOS_TEST_DIR/driver-recovery-attempt-1/sdk-live.log"
+grep -Fq 'Recovered from an iOS driver startup failure' "$IOS_TEST_DIR/run.log"
+[[ -z "${E2E_RECOVERY_ATTEMPT+x}" ]]
+
+# A failed retry must keep the retry status and must not claim recovery.
+RETRY_CALLS=0
+RETRY_RESULT=9
+printf '%s\n' 'IOSDriverTimeoutException: iOS driver not ready in time' \
+  >"$IOS_TEST_DIR/debug/maestro.log"
+: >"$IOS_TEST_DIR/run.log"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+[[ "$recovery_result" -eq 9 ]]
+[[ "$RETRY_CALLS" -eq 1 ]]
+grep -Fq 'retry also failed with exit 9' "$IOS_TEST_DIR/run.log"
+if grep -Fq 'Recovered from an iOS driver startup failure' "$IOS_TEST_DIR/run.log"; then
+  echo "expected a failed retry not to claim recovery" >&2
+  exit 1
+fi
+RETRY_RESULT=0
 
 # A driver-looking error after any command started is not safe to replay.
 RETRY_CALLS=0

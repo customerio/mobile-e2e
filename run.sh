@@ -31,6 +31,21 @@ find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
 # Never leave a previous run's video looking like evidence for the current run
 # when capture or annotated rendering fails partway through.
 rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
+# Recovery bundles describe the previous attempt of the current top-level run.
+# The recovery wrappers re-enter this script with the same artifact directory;
+# retain the bundle they just captured during that nested invocation.
+if [[ "${E2E_RECOVERY_ATTEMPT:-0}" != 1 ]]; then
+  for recovery_dir in \
+    "$OUT_DIR/driver-recovery-attempt-1" \
+    "$OUT_DIR/device-recovery-attempt-1"; do
+    if [[ -L "$recovery_dir" || -f "$recovery_dir" ]]; then
+      rm -f "$recovery_dir"
+    elif [[ -d "$recovery_dir" ]]; then
+      find "$recovery_dir" -mindepth 1 -delete
+      rmdir "$recovery_dir"
+    fi
+  done
+fi
 
 # --- Env
 # The top-level runner has already applied caller > shared file > sample file
@@ -290,6 +305,15 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   "$FLOW_PATH" | tee "$OUT_DIR/run.log"
 EXIT=$?
 set -e
+
+# Stop live device logging before artifact sanitization. Otherwise the log can
+# grow between redaction and the verification pass, leaving the uploaded copy
+# unverified or turning a green product run red.
+if [[ -n "$DEVICE_LOG_PID" ]]; then
+  kill "$DEVICE_LOG_PID" >/dev/null 2>&1 || true
+  wait "$DEVICE_LOG_PID" 2>/dev/null || true
+  DEVICE_LOG_PID=""
+fi
 
 # Maestro persists imported flow variables in commands-*.json. Scrub backend
 # API keys before the report renderer reads that JSON or CI can upload it.
