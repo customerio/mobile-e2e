@@ -673,13 +673,6 @@ collect_device_logs() {
     xcrun simctl spawn "$DEVICE_ID" log show --last 20m --style compact \
       --predicate 'process == "APN UIKit" OR subsystem CONTAINS "customer"' \
       >"$ARTIFACT_DIR/device.log" 2>&1 || true
-    # `log show` omits info/debug entries unless explicitly requested. Keep a
-    # narrow SDK-only stream so hosted failures retain identity, queue-fetch,
-    # and SSE lifecycle decisions without duplicating XCUITest's very noisy
-    # APN UIKit process log.
-    xcrun simctl spawn "$DEVICE_ID" log show --last 20m --style compact \
-      --info --debug --predicate 'subsystem CONTAINS "customer"' \
-      >"$ARTIFACT_DIR/sdk.log" 2>&1 || true
   fi
 }
 

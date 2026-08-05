@@ -222,6 +222,13 @@ else
   rm -rf "$FRAMES_DIR" && mkdir -p "$FRAMES_DIR"
   "$HARNESS_DIR/scripts/capture_frames.sh" "$BOOTED" "$FRAMES_DIR" >"$OUT_DIR/capture.log" 2>&1 &
   REC_PID=$!
+  # Unified logging may discard debug/info entries before a post-run `log
+  # show`. Stream only Customer.io subsystems while the flow is active so a
+  # hosted failure retains identity, queue-fetch, and SSE lifecycle decisions.
+  xcrun simctl spawn "$BOOTED" log stream --style compact --level debug \
+    --predicate 'subsystem CONTAINS "customer"' \
+    >"$OUT_DIR/sdk-live.log" 2>&1 &
+  DEVICE_LOG_PID=$!
 fi
 
 # --- Run maestro.
