@@ -105,15 +105,21 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
     commands:
       # XCUITest reports the clipped button's full frame just below the
       # dashboard scroll viewport, so scrollUntilVisible can false-positive.
-      # Move the scroll view explicitly before tapping the stable button id.
+      # Move the scroll view far enough to put the button above the fixed
+      # version-info footer before tapping the stable button id.
+      - swipe:
+          start: 50%, 70%
+          end: 50%, 35%
+          duration: 600
       - swipe:
           start: 50%, 70%
           end: 50%, 35%
           duration: 600
       - tapOn:
           id: "inbox_messages_button"
-          point: "10%,50%"
+          point: "50%,50%"
           retryTapIfNoChange: true
+          optional: true
 
 # The welcome campaign can finish loading during the dashboard-to-inbox
 # transition. Dismiss that last possible arrival before asserting/using the
@@ -121,6 +127,23 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
 - tapOn:
     text: "Continue"
     optional: true
+
+# If a late overlay intercepted the first tap, dismissing it leaves the
+# dashboard button visible. Re-tap only that UI control; do not replay the
+# transactional delivery or any backend assertion.
+- runFlow:
+    when:
+      platform: iOS
+      visible:
+        id: "inbox_messages_button"
+      notVisible:
+        id: "inbox_messages_list"
+    commands:
+      - tapOn:
+          id: "inbox_messages_button"
+          point: "50%,50%"
+          retryTapIfNoChange: true
+          optional: true
 
 - runFlow:
     when:

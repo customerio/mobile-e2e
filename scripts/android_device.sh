@@ -125,3 +125,73 @@ create_maestro_android_avd() {
   fi
   return "$maestro_status"
 }
+
+# Detect the narrow hosted-runner race where ADB goes offline while Maestro's
+# first launchApp command is starting. Only Maestro's configuration/setup
+# commands may precede it, and no later flow command may begin, because replaying
+# either side of the launch could duplicate SDK or backend mutations.
+android_maestro_transport_failed_at_launch() {
+  local artifact_dir="$1"
+  local maestro_log="$artifact_dir/debug/maestro.log"
+  [[ -f "$maestro_log" ]] || return 1
+  grep -E -q 'device offline|DeviceServerDiedException' "$maestro_log" || return 1
+  awk '
+    !launch_started && /onCommandStart:/ {
+      if (/onCommandStart: Launch app/) launch_started = 1
+      else if ($0 !~ /onCommandStart: (Define variables|Apply configuration|Run .*setup_run\.js|Run flow when Platform is )/) unsafe_before_launch = 1
+      next
+    }
+    launch_started && /onCommandFinished: Launch app.*FAILED/ { launch_failed = 1; next }
+    launch_started && /onCommandStart:/ { later_command_started = 1 }
+    END { exit !(launch_started && launch_failed && !unsafe_before_launch && !later_command_started) }
+  ' "$maestro_log"
+}
+
+wait_for_android_device_reconnect() {
+  local device_id="$1"
+  local timeout_seconds="${ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS:-60}"
+  local deadline state booted
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || return 2
+  adb start-server >/dev/null 2>&1 || true
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    state=$(adb -s "$device_id" get-state 2>/dev/null || true)
+    booted=$(adb -s "$device_id" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+    if [[ "$state" == "device" && "$booted" == "1" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+preserve_android_transport_failure() {
+  local artifact_dir="$1"
+  local retry_dir="$artifact_dir/device-recovery-attempt-1"
+  local diagnostic
+  mkdir -p "$retry_dir"
+  find "$retry_dir" -mindepth 1 -delete
+  cp -R "$artifact_dir/debug" "$retry_dir/debug"
+  for diagnostic in run.log report.xml report.html sink.stderr; do
+    if [[ -f "$artifact_dir/$diagnostic" ]]; then
+      cp "$artifact_dir/$diagnostic" "$retry_dir/$diagnostic"
+    fi
+  done
+}
+
+run_android_transport_recovery_once() {
+  local initial_result="$1"
+  local artifact_dir="$2"
+  local device_id="$3"
+  shift 3
+
+  [[ "$initial_result" -ne 0 ]] || return 0
+  android_maestro_transport_failed_at_launch "$artifact_dir" || return "$initial_result"
+  note "Android device went offline during the first app launch; waiting for ADB and retrying once"
+  preserve_android_transport_failure "$artifact_dir"
+  if ! wait_for_android_device_reconnect "$device_id"; then
+    note "Android device did not reconnect; preserving the original Maestro failure"
+    return "$initial_result"
+  fi
+  "$@"
+}

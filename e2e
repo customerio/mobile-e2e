@@ -708,7 +708,14 @@ run_e2e() {
   run_sample_maestro "$runner_platform"
   local result=$?
   set -e
-  if [[ "$result" -ne 0 && "$PLATFORM" == "ios" ]]; then
+  if [[ "$result" -ne 0 && "$PLATFORM" == "android" ]]; then
+    set +e
+    run_android_transport_recovery_once \
+      "$result" "$ARTIFACT_DIR" "$DEVICE_ID" \
+      run_sample_maestro "$runner_platform"
+    result=$?
+    set -e
+  elif [[ "$result" -ne 0 && "$PLATFORM" == "ios" ]]; then
     set +e
     run_ios_driver_recovery_once \
       "$result" "$ARTIFACT_DIR" "$DEVICE_ID" \
