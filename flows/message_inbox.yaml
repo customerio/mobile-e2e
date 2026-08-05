@@ -171,6 +171,18 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
     commands:
       - assertVisible:
           id: "inbox_messages_list"
+
+# The iOS sample deliberately exposes the SDK fetch path through pull-to-
+# refresh. Exercise it after the screen opens so the assertion validates
+# inbox.getMessages() plus listener/UI rendering, not an incidental cache hit.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - swipe:
+          start: 50%, 30%
+          end: 50%, 75%
+          duration: 800
 - extendedWaitUntil:
     visible: ".*${output.inbox_title_regex}.*"
     timeout: 15000
