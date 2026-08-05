@@ -37,10 +37,12 @@ select_ios_device() {
 # startup signatures so product assertions are never retried or hidden.
 ios_maestro_driver_failed() {
   local artifact_dir="$1"
+  local maestro_log="$artifact_dir/debug/maestro.log"
   local driver_log
+  local failed_poll_count
   [[ -d "$artifact_dir/debug" ]] || return 1
   for driver_log in \
-    "$artifact_dir/debug/maestro.log" \
+    "$maestro_log" \
     "$artifact_dir/debug"/xctest_runner_*.log; do
     [[ -f "$driver_log" ]] || continue
     if grep -E -q \
@@ -48,6 +50,42 @@ ios_maestro_driver_failed() {
       "$driver_log"; then
       return 0
     fi
+  done
+
+  # xcodebuild can write its terminal NSMachError several seconds after
+  # Maestro gives up. Normal boots also produce a handful of failed status
+  # polls, so only treat sustained polling with no ready transition as the
+  # synchronous form of the startup timeout. Hosted failures have ~190 polls;
+  # passing archived runs have 10-16 before [Done].
+  if [[ -f "$maestro_log" ]]; then
+    failed_poll_count=$(grep -E -c \
+      'xcTestDriverStatusCheck: \[Failed\].*ConnectException: Failed to connect to /127\.0\.0\.1:[0-9]+' \
+      "$maestro_log" || true)
+    if [[ "$failed_poll_count" -ge 60 ]] &&
+       ! grep -E -q 'xcTestDriverStatusCheck: \[Done\]' "$maestro_log"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# The CliConsoleListener marker used by older Maestro releases is absent from
+# current 2.x logs. TestSuiteInteractor's stable flow-entry line is emitted
+# before any real command; lifecycle lines are a secondary signal. A completed
+# commands artifact is a final fallback. Any signal makes replay unsafe.
+ios_maestro_flow_started() {
+  local artifact_dir="$1"
+  local maestro_log="$artifact_dir/debug/maestro.log"
+  local commands_file
+
+  if [[ -f "$maestro_log" ]] &&
+     grep -E -q \
+       'maestro\.cli\.runner\.TestSuiteInteractor\.runFlow: +Running flow |maestro\.cli\.runner\.TestSuiteInteractor\.runFlow.* (RUNNING|COMPLETED|FAILED|SKIPPED)$' \
+       "$maestro_log"; then
+    return 0
+  fi
+  for commands_file in "$artifact_dir/debug"/commands-*.json; do
+    [[ -f "$commands_file" ]] && return 0
   done
   return 1
 }
@@ -98,9 +136,7 @@ run_ios_driver_recovery_once() {
 
   [[ "$initial_result" -ne 0 ]] || return 0
   ios_maestro_driver_failed "$artifact_dir" || return "$initial_result"
-  if [[ -f "$artifact_dir/debug/maestro.log" ]] &&
-     grep -Fq 'maestro.cli.runner.CliConsoleListener.onCommandStart' \
-       "$artifact_dir/debug/maestro.log"; then
+  if ios_maestro_flow_started "$artifact_dir"; then
     return "$initial_result"
   fi
 

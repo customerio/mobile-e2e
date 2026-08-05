@@ -102,10 +102,46 @@ ios_maestro_driver_failed "$IOS_TEST_DIR" || {
   exit 1
 }
 
+# Maestro can exit before xcodebuild writes its final NSMachErrorDomain failure.
+# Sustained status polling without a ready transition is the synchronous signal.
+: >"$IOS_TEST_DIR/debug/maestro.log"
+for _ in $(seq 1 60); do
+  printf '%s\n' \
+    'xcTestDriverStatusCheck: [Failed] Perform XCUITest driver status check, exception: java.net.ConnectException: Failed to connect to /127.0.0.1:51504' \
+    >>"$IOS_TEST_DIR/debug/maestro.log"
+done
+printf '%s\n' 'XCUITest launch still running; no terminal error yet' \
+  >"$IOS_TEST_DIR/debug/xctest_runner_test.log"
+ios_maestro_driver_failed "$IOS_TEST_DIR" || {
+  echo "expected sustained XCUITest polling to be recoverable" >&2
+  exit 1
+}
+
+# A normal startup has a bounded number of failed polls followed by [Done].
+: >"$IOS_TEST_DIR/debug/maestro.log"
+for _ in $(seq 1 14); do
+  printf '%s\n' \
+    'xcTestDriverStatusCheck: [Failed] Perform XCUITest driver status check, exception: java.net.ConnectException: Failed to connect to /127.0.0.1:51504' \
+    >>"$IOS_TEST_DIR/debug/maestro.log"
+done
+printf '%s\n' 'xcTestDriverStatusCheck: [Done] Perform XCUITest driver status check' \
+  >>"$IOS_TEST_DIR/debug/maestro.log"
 printf '%s\n' 'Assertion is false: expected SDK content is visible' \
   >"$IOS_TEST_DIR/debug/xctest_runner_test.log"
 if ios_maestro_driver_failed "$IOS_TEST_DIR"; then
-  echo "expected product assertion failures not to trigger driver recovery" >&2
+  echo "expected normal startup polling not to look like a driver failure" >&2
+  exit 1
+fi
+
+# Once the driver became ready, later polling can never reclassify the run as a
+# safe startup failure; the flow may already have mutated the backend.
+for _ in $(seq 1 60); do
+  printf '%s\n' \
+    'xcTestDriverStatusCheck: [Failed] Perform XCUITest driver status check, exception: java.net.ConnectException: Failed to connect to /127.0.0.1:51504' \
+    >>"$IOS_TEST_DIR/debug/maestro.log"
+done
+if ios_maestro_driver_failed "$IOS_TEST_DIR"; then
+  echo "expected a prior driver-ready transition to remain fail-closed" >&2
   exit 1
 fi
 
@@ -155,12 +191,46 @@ grep -Fq 'first attempt output' "$IOS_TEST_DIR/driver-recovery-attempt-1/run.log
 RETRY_CALLS=0
 printf '%s\n' \
   'IOSDriverTimeoutException: driver died' \
-  'maestro.cli.runner.CliConsoleListener.onCommandStart: Launch app RUNNING' \
+  'maestro.cli.runner.TestSuiteInteractor.runFlow:  Running flow Message Inbox' \
+  'maestro.cli.runner.TestSuiteInteractor.runFlow$lambda$17$lambda$5: Launch app with clear state RUNNING' \
   >"$IOS_TEST_DIR/debug/maestro.log"
 set +e
 run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
 recovery_result=$?
 set -e
+[[ "$recovery_result" -eq 7 ]]
+[[ "$RETRY_CALLS" -eq 0 ]]
+
+# Benign startup polling followed by a product failure must not be classified
+# as a driver failure. This is the common non-driver non-zero path.
+RETRY_CALLS=0
+: >"$IOS_TEST_DIR/debug/maestro.log"
+for _ in $(seq 1 14); do
+  printf '%s\n' \
+    'xcTestDriverStatusCheck: [Failed] Perform XCUITest driver status check, exception: java.net.ConnectException: Failed to connect to /127.0.0.1:51504' \
+    >>"$IOS_TEST_DIR/debug/maestro.log"
+done
+printf '%s\n' \
+  'xcTestDriverStatusCheck: [Done] Perform XCUITest driver status check' \
+  'maestro.cli.runner.TestSuiteInteractor.runFlow:  Running flow Message Inbox' \
+  >>"$IOS_TEST_DIR/debug/maestro.log"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+[[ "$recovery_result" -eq 7 ]]
+[[ "$RETRY_CALLS" -eq 0 ]]
+
+# A completed commands artifact is a final flow-start fallback.
+RETRY_CALLS=0
+printf '%s\n' 'IOSDriverTimeoutException: driver died' \
+  >"$IOS_TEST_DIR/debug/maestro.log"
+printf '%s\n' '[]' >"$IOS_TEST_DIR/debug/commands-(flow).json"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+rm -f "$IOS_TEST_DIR/debug/commands-(flow).json"
 [[ "$recovery_result" -eq 7 ]]
 [[ "$RETRY_CALLS" -eq 0 ]]
 
