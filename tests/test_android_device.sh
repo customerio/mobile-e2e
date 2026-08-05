@@ -24,6 +24,34 @@ fake_emulator() {
   printf '%s\n' "$AVD_LIST"
 }
 
+AVDMANAGER_RESULT=0
+AVDMANAGER_REGISTERS=1
+AVDMANAGER_NAME=""
+AVDMANAGER_STDIN=""
+AVDMANAGER_ARGS=""
+avdmanager() {
+  AVDMANAGER_STDIN=$(cat)
+  AVDMANAGER_ARGS="$*"
+  local previous=""
+  local argument
+  for argument in "$@"; do
+    if [[ "$previous" == "--name" ]]; then
+      AVDMANAGER_NAME="$argument"
+    fi
+    previous="$argument"
+  done
+  if [[ "$AVDMANAGER_RESULT" -eq 0 && "$AVDMANAGER_REGISTERS" == 1 ]]; then
+    AVD_LIST="$AVDMANAGER_NAME"
+  fi
+  return "$AVDMANAGER_RESULT"
+}
+
+UNAME_MACHINE="x86_64"
+uname() {
+  [[ "${1:-}" == "-m" ]] || return 64
+  printf '%s\n' "$UNAME_MACHINE"
+}
+
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mobile-e2e-android-device.XXXXXX")"
 START_LOG="$TEST_DIR/start-device.log"
 cleanup_test_dir() {
@@ -31,6 +59,39 @@ cleanup_test_dir() {
   rmdir "$TEST_DIR"
 }
 trap cleanup_test_dir EXIT
+
+AVD_LIST=""
+AVDMANAGER_RESULT=0
+AVDMANAGER_REGISTERS=1
+create_headless_android_avd fake_emulator "Maestro_ANDROID_pixel_7_android-35" "$TEST_DIR/avdmanager.log"
+[[ "$AVDMANAGER_NAME" == "Maestro_ANDROID_pixel_7_android-35" ]]
+[[ "$AVDMANAGER_STDIN" == "no" ]]
+[[ "$AVDMANAGER_ARGS" == *"--package system-images;android-35;google_apis;x86_64"* ]]
+[[ "$AVDMANAGER_ARGS" == *"--abi x86_64"* ]]
+
+AVD_LIST=""
+UNAME_MACHINE="arm64"
+create_headless_android_avd fake_emulator "Maestro_ANDROID_pixel_7_android-35" "$TEST_DIR/avdmanager.log"
+[[ "$AVDMANAGER_ARGS" == *"--package system-images;android-35;google_apis;arm64-v8a"* ]]
+[[ "$AVDMANAGER_ARGS" == *"--abi arm64-v8a"* ]]
+
+AVD_LIST=""
+UNAME_MACHINE="x86_64"
+AVDMANAGER_RESULT=1
+if create_headless_android_avd fake_emulator "Maestro_ANDROID_pixel_7_android-35" "$TEST_DIR/avdmanager.log"; then
+  echo "expected headless AVD creation failure to propagate" >&2
+  exit 1
+fi
+
+AVD_LIST=""
+AVDMANAGER_RESULT=0
+AVDMANAGER_REGISTERS=0
+if create_headless_android_avd fake_emulator "Maestro_ANDROID_pixel_7_android-35" "$TEST_DIR/avdmanager.log"; then
+  echo "expected headless AVD creation to fail when avdmanager does not register it" >&2
+  exit 1
+fi
+grep -Fq "exited successfully but did not register" "$TEST_DIR/avdmanager.log"
+AVDMANAGER_REGISTERS=1
 
 MAESTRO_RESULT=1
 AVD_LIST=""

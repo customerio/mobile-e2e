@@ -118,6 +118,8 @@ note() {
 # without booting an Android device in a unit test.
 # shellcheck source=scripts/android_device.sh
 source "$HARNESS_DIR/scripts/android_device.sh"
+# shellcheck source=scripts/ios_device.sh
+source "$HARNESS_DIR/scripts/ios_device.sh"
 
 if [[ $# -gt 0 && ("$1" == "run" || "$1" == "doctor") ]]; then
   COMMAND="$1"
@@ -468,8 +470,13 @@ start_android_device() {
   emulator_bin=$(resolve_android_emulator) || die "Android emulator binary was not found"
   avd_name="${ANDROID_AVD_NAME:-Maestro_ANDROID_pixel_7_android-35}"
   if ! android_avd_is_listed "$emulator_bin" "$avd_name"; then
-    create_maestro_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/start-device.log" \
-      || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+    if [[ "$HEADLESS" == 1 || -n "${CI:-}" ]]; then
+      create_headless_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/avdmanager.log" \
+        || die "could not create a registered Android AVD; see $ARTIFACT_DIR/avdmanager.log"
+    else
+      create_maestro_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/start-device.log" \
+        || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+    fi
     local started
     started=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
     if [[ -n "$started" ]]; then
@@ -494,39 +501,21 @@ start_android_device() {
 
 find_ios_device() {
   local preferred="${IOS_SIMULATOR_NAME:-}"
-  xcrun simctl list devices available -j | jq -r --arg preferred "$preferred" '
-    [.devices[][] | select(.isAvailable == true) | select(.name | startswith("iPhone"))] as $phones |
-    if $preferred != "" then
-      (($phones | map(select(.name == $preferred)))[0].udid // empty)
-    else
-      ((($phones | map(select(.name == "Maestro iPhone 17 Pro")))[0] //
-        ($phones | map(select(.name == "iPhone 17 Pro")))[0] //
-        $phones[0]).udid // empty)
-    end'
+  xcrun simctl list devices available -j | select_ios_device "$preferred"
 }
 
 start_ios_device() {
   require_command jq
-  local booted
+  local booted selected
   booted=$(xcrun simctl list devices booted -j | jq -r \
-    '[.devices[][] | select(.state == "Booted") | select(.name | startswith("iPhone"))][0].udid // empty')
-  if [[ -n "$booted" ]]; then
+    '[.devices[][] | select(.state == "Booted") |
+      select((.name | startswith("iPhone")) or (.name | startswith("Maestro iPhone")))][0].udid // empty')
+  if [[ -n "$booted" && "$KEEP_DEVICE" == 1 ]]; then
     DEVICE_ID="$booted"
-    if [[ "$KEEP_DEVICE" == 0 ]]; then
-      # Repeated XCUITest sessions can leave Simulator's text-input service in
-      # a state where Maestro reports inputText success but drops the value.
-      # A normal run favors determinism; --keep-device intentionally preserves
-      # the faster iteration behavior and the current visual state.
-      note "restarting iOS Simulator $booted for a clean automation session"
-      xcrun simctl shutdown "$booted"
-      xcrun simctl boot "$booted"
-      xcrun simctl bootstatus "$booted" -b
-    fi
     note "reusing iOS Simulator $booted"
     return
   fi
 
-  local selected
   selected=$(find_ios_device)
   if [[ -z "$selected" ]]; then
     if [[ -n "${IOS_SIMULATOR_NAME:-}" ]]; then
@@ -535,6 +524,22 @@ start_ios_device() {
     die "no available iPhone simulator was found; install an iOS runtime in Xcode"
   fi
   [[ -n "$selected" ]] || die "no compatible iOS Simulator is available"
+
+  if [[ -n "$booted" && "$booted" == "$selected" ]]; then
+    DEVICE_ID="$booted"
+    # Repeated XCUITest sessions can leave Simulator's text-input service in a
+    # state where Maestro reports inputText success but drops the value.
+    note "restarting iOS Simulator $booted for a clean automation session"
+    xcrun simctl shutdown "$booted"
+    xcrun simctl boot "$booted"
+    xcrun simctl bootstatus "$booted" -b
+    note "reusing iOS Simulator $booted"
+    return
+  elif [[ -n "$booted" ]]; then
+    note "shutting down non-selected iOS Simulator $booted"
+    xcrun simctl shutdown "$booted" >/dev/null 2>&1 || true
+  fi
+
   xcrun simctl boot "$selected" 2>/dev/null || true
   xcrun simctl bootstatus "$selected" -b
   DEVICE_ID="$selected"
