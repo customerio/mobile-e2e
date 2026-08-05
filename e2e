@@ -676,6 +676,10 @@ collect_device_logs() {
   fi
 }
 
+run_sample_maestro() {
+  (cd "$SAMPLE_ROOT" && PLATFORM="$1" bash "$HARNESS_DIR/run.sh" "$FLOW")
+}
+
 run_e2e() {
   local runner_platform
   if [[ "$SKIP_DOCTOR" == 0 ]]; then
@@ -701,9 +705,17 @@ run_e2e() {
   export E2E_ENV_PRELOADED=true
   note "running $FLOW on $DEVICE_ID"
   set +e
-  (cd "$SAMPLE_ROOT" && PLATFORM="$runner_platform" bash "$HARNESS_DIR/run.sh" "$FLOW")
+  run_sample_maestro "$runner_platform"
   local result=$?
   set -e
+  if [[ "$result" -ne 0 && "$PLATFORM" == "ios" ]]; then
+    set +e
+    run_ios_driver_recovery_once \
+      "$result" "$ARTIFACT_DIR" "$DEVICE_ID" \
+      run_sample_maestro "$runner_platform"
+    result=$?
+    set -e
+  fi
   collect_device_logs
   if ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$ARTIFACT_DIR" ||
      ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" --check "$ARTIFACT_DIR"; then

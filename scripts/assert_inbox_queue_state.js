@@ -117,15 +117,33 @@
     var attempts = 0
     var stableAbsentAttempts = 0
     var lastSeen = []
+    var lastAttemptWasTransportError = false
 
     while (Date.now() - startedAt < MAX) {
         attempts++
+        lastAttemptWasTransportError = false
         var correlation = DELIVERY_ID || MARKER
         var sessionId = "maestro-inbox-" + encodeURIComponent(correlation) + "-" + attempts
-        var res = http.post(BASE + "/api/v4/users?sessionId=" + sessionId, {
-            body: "{}",
-            headers: headers
-        })
+        var res
+        try {
+            res = http.post(BASE + "/api/v4/users?sessionId=" + sessionId, {
+                body: "{}",
+                headers: headers
+            })
+        } catch (error) {
+            lastAttemptWasTransportError = true
+            stableAbsentAttempts = 0
+            postSink({
+                result: "transport_error",
+                reason: "queue_transport_error",
+                attempts: attempts,
+                error: String(error)
+            })
+            var retryRemaining = MAX - (Date.now() - startedAt)
+            if (retryRemaining <= 0) break
+            busyWait(Math.min(INTERVAL, retryRemaining))
+            continue
+        }
 
         if (res.status === 200 || res.status === 204) {
             var messages = res.status === 200 ? (parse(res).inboxMessages || []) : []
@@ -220,9 +238,13 @@
         busyWait(Math.min(INTERVAL, remaining))
     }
 
-    output.assert_reason = SHOULD_EXIST
-        ? "message_or_opened_state_not_matched_after_" + attempts
-        : "message_still_present_after_" + attempts
+    if (lastAttemptWasTransportError) {
+        output.assert_reason = "queue_transport_error"
+    } else {
+        output.assert_reason = SHOULD_EXIST
+            ? "message_or_opened_state_not_matched_after_" + attempts
+            : "message_still_present_after_" + attempts
+    }
     output.attempts = String(attempts)
     output.elapsed_ms = String(Date.now() - startedAt)
     output.messages_seen = JSON.stringify(lastSeen)

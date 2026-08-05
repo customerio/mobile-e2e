@@ -87,4 +87,94 @@ selected=$(printf '%s' "$GENERIC_FALLBACK_JSON" | select_ios_device "")
   exit 1
 }
 
+IOS_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mobile-e2e-ios-device.XXXXXX")"
+cleanup_test_dir() {
+  find "$IOS_TEST_DIR" -mindepth 1 -delete
+  rmdir "$IOS_TEST_DIR"
+}
+trap cleanup_test_dir EXIT
+mkdir -p "$IOS_TEST_DIR/debug"
+
+printf '%s\n' 'NSMachErrorDomain Code=-308 "(ipc/mig) server died"' \
+  >"$IOS_TEST_DIR/debug/xctest_runner_test.log"
+ios_maestro_driver_failed "$IOS_TEST_DIR" || {
+  echo "expected the XCUITest launch failure to be recoverable" >&2
+  exit 1
+}
+
+printf '%s\n' 'Assertion is false: expected SDK content is visible' \
+  >"$IOS_TEST_DIR/debug/xctest_runner_test.log"
+if ios_maestro_driver_failed "$IOS_TEST_DIR"; then
+  echo "expected product assertion failures not to trigger driver recovery" >&2
+  exit 1
+fi
+
+mkdir -p "$IOS_TEST_DIR/debug/product-failure/logs"
+printf '%s\n' 'NSMachErrorDomain Code=-308 from an unrelated simulator process' \
+  >"$IOS_TEST_DIR/debug/product-failure/logs/device-simulator.log"
+if ios_maestro_driver_failed "$IOS_TEST_DIR"; then
+  echo "expected nested product diagnostics not to trigger driver recovery" >&2
+  exit 1
+fi
+
+XCRUN_LOG="$IOS_TEST_DIR/xcrun.log"
+: >"$XCRUN_LOG"
+XCRUN_BOOTSTATUS_RESULT=0
+xcrun() {
+  printf '%s\n' "$*" >>"$XCRUN_LOG"
+  if [[ "$*" == "simctl shutdown retry-device" ]]; then
+    return 1
+  fi
+  if [[ "$*" == "simctl bootstatus retry-device -b" ]]; then
+    return "$XCRUN_BOOTSTATUS_RESULT"
+  fi
+}
+restart_ios_device "retry-device"
+grep -Fq "simctl shutdown retry-device" "$XCRUN_LOG"
+grep -Fq "simctl boot retry-device" "$XCRUN_LOG"
+grep -Fq "simctl bootstatus retry-device -b" "$XCRUN_LOG"
+
+NOTES=""
+note() {
+  NOTES+="$*"$'\n'
+}
+RETRY_CALLS=0
+retry_command() {
+  RETRY_CALLS=$((RETRY_CALLS + 1))
+  return 0
+}
+printf '%s\n' 'IOSDriverTimeoutException: iOS driver not ready in time' \
+  >"$IOS_TEST_DIR/debug/maestro.log"
+printf '%s\n' 'first attempt output' >"$IOS_TEST_DIR/run.log"
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+[[ "$RETRY_CALLS" -eq 1 ]]
+[[ -f "$IOS_TEST_DIR/driver-recovery-attempt-1/debug/maestro.log" ]]
+grep -Fq 'first attempt output' "$IOS_TEST_DIR/driver-recovery-attempt-1/run.log"
+
+# A driver-looking error after any command started is not safe to replay.
+RETRY_CALLS=0
+printf '%s\n' \
+  'IOSDriverTimeoutException: driver died' \
+  'maestro.cli.runner.CliConsoleListener.onCommandStart: Launch app RUNNING' \
+  >"$IOS_TEST_DIR/debug/maestro.log"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+[[ "$recovery_result" -eq 7 ]]
+[[ "$RETRY_CALLS" -eq 0 ]]
+
+# A failed simulator restart returns the original result and never replays.
+RETRY_CALLS=0
+XCRUN_BOOTSTATUS_RESULT=1
+printf '%s\n' 'IOSDriverTimeoutException: driver failed during launch' \
+  >"$IOS_TEST_DIR/debug/maestro.log"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+[[ "$recovery_result" -eq 7 ]]
+[[ "$RETRY_CALLS" -eq 0 ]]
+grep -Fq 'iOS Simulator restart failed' <<<"$NOTES"
+
 echo "iOS device selection tests passed"

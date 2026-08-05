@@ -56,7 +56,7 @@ create_headless_android_avd() {
   local emulator_bin="$1"
   local expected_avd_name="$2"
   local create_log="$3"
-  local avdmanager_bin abi system_image
+  local avdmanager_bin abi system_image avd_home
 
   avdmanager_bin=$(resolve_android_avdmanager || true)
   [[ -n "$avdmanager_bin" ]] || {
@@ -69,8 +69,13 @@ create_headless_android_avd() {
     return 1
   }
   system_image="system-images;android-35;google_apis;$abi"
+  avd_home="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+  mkdir -p "$avd_home"
+  export ANDROID_AVD_HOME="$avd_home"
 
   note "creating Android virtual device for headless execution"
+  printf 'avdmanager: %s\nANDROID_AVD_HOME: %s\nsystem image: %s\n' \
+    "$avdmanager_bin" "$ANDROID_AVD_HOME" "$system_image" >"$create_log"
   if ! "$avdmanager_bin" create avd \
     --force \
     --name "$expected_avd_name" \
@@ -78,7 +83,7 @@ create_headless_android_avd() {
     --tag google_apis \
     --abi "$abi" \
     --device pixel_7 \
-    >"$create_log" 2>&1 <<<"no"; then
+    >>"$create_log" 2>&1 <<<"no"; then
     return 1
   fi
 

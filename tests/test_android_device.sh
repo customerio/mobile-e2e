@@ -29,9 +29,11 @@ AVDMANAGER_REGISTERS=1
 AVDMANAGER_NAME=""
 AVDMANAGER_STDIN=""
 AVDMANAGER_ARGS=""
+AVDMANAGER_AVD_HOME=""
 avdmanager() {
   AVDMANAGER_STDIN=$(cat)
   AVDMANAGER_ARGS="$*"
+  AVDMANAGER_AVD_HOME="${ANDROID_AVD_HOME:-}"
   local previous=""
   local argument
   for argument in "$@"; do
@@ -54,6 +56,8 @@ uname() {
 
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mobile-e2e-android-device.XXXXXX")"
 START_LOG="$TEST_DIR/start-device.log"
+ANDROID_AVD_HOME="$TEST_DIR/avd"
+export ANDROID_AVD_HOME
 cleanup_test_dir() {
   find "$TEST_DIR" -mindepth 1 -delete
   rmdir "$TEST_DIR"
@@ -68,6 +72,9 @@ create_headless_android_avd fake_emulator "Maestro_ANDROID_pixel_7_android-35" "
 [[ "$AVDMANAGER_STDIN" == "no" ]]
 [[ "$AVDMANAGER_ARGS" == *"--package system-images;android-35;google_apis;x86_64"* ]]
 [[ "$AVDMANAGER_ARGS" == *"--abi x86_64"* ]]
+[[ "$AVDMANAGER_AVD_HOME" == "$TEST_DIR/avd" ]]
+[[ -d "$ANDROID_AVD_HOME" ]]
+grep -Fq "ANDROID_AVD_HOME: $TEST_DIR/avd" "$TEST_DIR/avdmanager.log"
 
 AVD_LIST=""
 UNAME_MACHINE="arm64"

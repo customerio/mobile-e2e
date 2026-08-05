@@ -74,7 +74,9 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
       EXPECTED_OPENED: "false"
       REQUIRE_TITLE_BODY: "true"
       REQUIRE_VISUAL_RENDERABLE: "true"
-      MAX_WAIT_MS: "30000"
+      # Leave room for a retry when the hosted runner sees a transient Gist
+      # connection reset. A single request took 35 seconds in the failing run.
+      MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
 # Identification can trigger an unrelated welcome in-app message after the
