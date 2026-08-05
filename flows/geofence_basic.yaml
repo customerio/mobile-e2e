@@ -97,9 +97,11 @@ name: Geofence — outside → inside → backend transition
       WAIT_MS: "3000"
 - runFlow:
     when:
-      visible: "Continue"
+      visible: ".*Thank you for choosing.*"
     commands:
-      - tapOn: "Continue"
+      - tapOn:
+          text: "Continue"
+          optional: true
 - assertVisible: "^Location Test$"
 - scrollUntilVisible:
     element:

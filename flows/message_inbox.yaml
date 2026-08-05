@@ -145,6 +145,21 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
           retryTapIfNoChange: true
           optional: true
 
+# The welcome campaign can arrive after navigation and after the immediate
+# dismissal check. Give it one bounded final window before asserting the inbox
+# screen so it cannot hide an otherwise-successful SDK navigation.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- runFlow:
+    when:
+      visible: ".*Thank you for choosing.*"
+    commands:
+      - tapOn:
+          text: "Continue"
+          optional: true
+
 - runFlow:
     when:
       platform: Android
