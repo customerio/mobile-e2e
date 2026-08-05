@@ -79,44 +79,19 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
       MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# iOS fetches its remote message queue when the SDK identity changes. The
-# public inbox.getMessages() API reads the SDK's current local state; pulling
-# the sample table to refresh therefore cannot make a just-created delivery
-# appear. Clear and restore the same SDK identity only after the backend has
-# confirmed that exact delivery exists, so the second identify performs a
-# deterministic SDK queue fetch without creating another customer or message.
+# The Gist queue is scoped to a process-level session id. The first iOS session
+# starts before this transactional message exists, and inbox.getMessages() only
+# reads the SDK's current local state. Restart the process without clearing app
+# data after the backend confirms the delivery: the sample restores the same
+# persisted SDK identity, Gist creates a new session id, and normal SDK startup
+# fetches the existing delivery without creating another customer or message.
 - runFlow:
     when:
       platform: iOS
     commands:
-      # Identification can also schedule the unrelated welcome campaign while
-      # the backend assertions run. Clear it before touching the logout button.
-      - tapOn:
-          text: "Continue"
-          optional: true
-      - swipe:
-          start: 50%, 70%
-          end: 50%, 35%
-          duration: 600
-      - swipe:
-          start: 50%, 70%
-          end: 50%, 35%
-          duration: 600
-      - tapOn:
-          id: "Log Out Button"
-          point: "50%,50%"
-      - assertVisible:
-          id: "login_button"
-      - tapOn:
-          id: "first_name_input"
-      - inputText: "Maestro Inbox Tester"
-      - hideKeyboard
-      - tapOn:
-          id: "email_input"
-      - inputText: ${output.email}
-      - hideKeyboard
-      - tapOn:
-          id: "login_button"
+      - stopApp
+      - launchApp:
+          clearState: false
 
 # Identification can trigger an unrelated welcome in-app message after the
 # first, immediate dismissal check. Clear it again before navigating so it
