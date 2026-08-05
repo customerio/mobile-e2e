@@ -234,6 +234,19 @@ rm -f "$IOS_TEST_DIR/debug/commands-(flow).json"
 [[ "$recovery_result" -eq 7 ]]
 [[ "$RETRY_CALLS" -eq 0 ]]
 
+# Maestro 2.x nests commands.json below a flow-named directory. It carries the
+# same fail-closed meaning: flow execution started, so recovery must not replay.
+mkdir -p "$IOS_TEST_DIR/debug/Message Inbox"
+printf '%s\n' '[]' >"$IOS_TEST_DIR/debug/Message Inbox/commands.json"
+set +e
+run_ios_driver_recovery_once 7 "$IOS_TEST_DIR" "retry-device" retry_command
+recovery_result=$?
+set -e
+find "$IOS_TEST_DIR/debug/Message Inbox" -mindepth 1 -delete
+rmdir "$IOS_TEST_DIR/debug/Message Inbox"
+[[ "$recovery_result" -eq 7 ]]
+[[ "$RETRY_CALLS" -eq 0 ]]
+
 # A failed simulator restart returns the original result and never replays.
 RETRY_CALLS=0
 XCRUN_BOOTSTATUS_RESULT=1

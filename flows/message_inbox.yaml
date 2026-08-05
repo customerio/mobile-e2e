@@ -174,6 +174,19 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
           text: "Continue"
           optional: true
 
+# Older/newer XCUITest accessibility projections can expose the dashboard
+# button by its visible label instead of the identifier assigned in code. Run
+# this only after all welcome-overlay recovery and keep it non-blocking.
+- runFlow:
+    when:
+      platform: iOS
+      notVisible:
+        id: "inbox_messages_list"
+    commands:
+      - tapOn:
+          text: "Inbox Messages"
+          optional: true
+
 - runFlow:
     when:
       platform: Android

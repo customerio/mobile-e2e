@@ -353,14 +353,27 @@ python3 "$HARNESS_DIR/scripts/render_report.py" \
   || echo "warn: HTML evidence render failed"
 
 if [[ -f "$OUT_DIR/device.mp4" ]]; then
-  python3 "$HARNESS_DIR/scripts/render_video.py" \
-    --commands "$DEBUG_DIR"/commands-*.json \
-    --device "$OUT_DIR/device.mp4" \
-    --rec-started-ms "$REC_STARTED_AT_MS" \
-    --sink "$SINK_LOG" \
-    --title "$FLOW_NAME" \
-    --out "$OUT_DIR/annotated.mp4" \
-    || echo "warn: annotated video render failed"
+  COMMANDS_JSON=""
+  if [[ -d "$DEBUG_DIR" ]]; then
+    COMMANDS_JSON=$(find "$DEBUG_DIR" -maxdepth 1 -type f \
+      -name 'commands-*.json' -print -quit 2>/dev/null || true)
+    if [[ -z "$COMMANDS_JSON" ]]; then
+      COMMANDS_JSON=$(find "$DEBUG_DIR" -type f \
+        -name commands.json -print -quit 2>/dev/null || true)
+    fi
+  fi
+  if [[ -n "$COMMANDS_JSON" ]]; then
+    python3 "$HARNESS_DIR/scripts/render_video.py" \
+      --commands "$COMMANDS_JSON" \
+      --device "$OUT_DIR/device.mp4" \
+      --rec-started-ms "$REC_STARTED_AT_MS" \
+      --sink "$SINK_LOG" \
+      --title "$FLOW_NAME" \
+      --out "$OUT_DIR/annotated.mp4" \
+      || echo "warn: annotated video render failed"
+  else
+    echo "warn: annotated video render skipped; no Maestro commands JSON found"
+  fi
 fi
 
 python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$OUT_DIR"

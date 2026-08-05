@@ -4,7 +4,7 @@
 Usage:
   render_report.py <debug_output_dir> <out_html> [--screens-dir <dir>]
 
-Reads commands-*.json (per-step status), maestro.log (script output), and
+Reads Maestro command JSON (per-step status), maestro.log (script output), and
 inlines screenshots + the device screen recording if present.
 """
 import argparse
@@ -196,9 +196,30 @@ def find_screenshot(screens_dir: Path, base_name: str) -> Path | None:
 
 
 def find_failure_screenshot(debug_dir: Path) -> Path | None:
-    for p in debug_dir.glob("screenshot-*.png"):
-        return p
-    return None
+    candidates = list(debug_dir.rglob("screenshot-*.png"))
+    # Maestro 2.x stores failure images below a flow-named screenshots/
+    # directory and names them after the failed step.
+    candidates.extend(debug_dir.rglob("screenshots/*.png"))
+    if not candidates:
+        return None
+
+    # A failing run can contain screenshots for earlier recovered commands.
+    # Prefer the newest file and use its path as a deterministic tie-breaker
+    # when an extracted archive gives every image the same timestamp.
+    return max(
+        set(candidates),
+        key=lambda path: (path.stat().st_mtime_ns, path.as_posix()),
+    )
+
+
+def find_commands_json(debug_dir: Path) -> Path | None:
+    """Find command output from either Maestro's legacy or 2.x layout."""
+    legacy = sorted(debug_dir.glob("commands-*.json"))
+    if legacy:
+        return legacy[0]
+
+    nested = sorted(debug_dir.rglob("commands.json"))
+    return nested[0] if nested else None
 
 
 def extract_script_log(maestro_log: Path) -> list[str]:
@@ -226,10 +247,9 @@ def main():
     out = Path(args.out)
     screens_dir = Path(args.screens_dir) if args.screens_dir else debug.parent
 
-    # Load the first commands-*.json
-    cj = next(iter(sorted(debug.glob("commands-*.json"))), None)
+    cj = find_commands_json(debug)
     if not cj:
-        print(f"No commands-*.json found in {debug}", file=sys.stderr)
+        print(f"No Maestro commands JSON found in {debug}", file=sys.stderr)
         return 2
     commands = json.loads(cj.read_text())
     commands.sort(key=lambda c: c.get("metadata", {}).get("timestamp", 0))

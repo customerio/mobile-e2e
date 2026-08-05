@@ -75,7 +75,8 @@ ios_maestro_driver_failed() {
 # commands artifact is a final fallback. Any signal makes replay unsafe.
 ios_maestro_flow_started() {
   local artifact_dir="$1"
-  local maestro_log="$artifact_dir/debug/maestro.log"
+  local debug_dir="$artifact_dir/debug"
+  local maestro_log="$debug_dir/maestro.log"
   local commands_file
 
   if [[ -f "$maestro_log" ]] &&
@@ -84,9 +85,17 @@ ios_maestro_flow_started() {
        "$maestro_log"; then
     return 0
   fi
-  for commands_file in "$artifact_dir/debug"/commands-*.json; do
+  [[ -d "$debug_dir" ]] || return 1
+  for commands_file in "$debug_dir"/commands-*.json; do
     [[ -f "$commands_file" ]] && return 0
   done
+  # Maestro 2.x ignores --flatten-debug-output for the per-flow command file
+  # and nests it below a flow-named directory.
+  commands_file=$(find "$debug_dir" -type f -name commands.json \
+    -print -quit 2>/dev/null || true)
+  if [[ -n "$commands_file" ]]; then
+    return 0
+  fi
   return 1
 }
 
