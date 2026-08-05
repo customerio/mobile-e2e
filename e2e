@@ -467,7 +467,7 @@ start_android_device() {
   local emulator_bin avd_name
   emulator_bin=$(resolve_android_emulator) || die "Android emulator binary was not found"
   avd_name="${ANDROID_AVD_NAME:-Maestro_ANDROID_pixel_7_android-35}"
-  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
+  if ! android_avd_is_listed "$emulator_bin" "$avd_name"; then
     create_maestro_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/start-device.log" \
       || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
     local started
@@ -480,10 +480,6 @@ start_android_device() {
       return
     fi
   fi
-  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
-    avd_name=$("$emulator_bin" -list-avds | awk '/^Maestro_ANDROID_/ {print; exit}')
-  fi
-  [[ -n "$avd_name" ]] || die "Maestro did not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
 
   local emulator_args=(-avd "$avd_name" -no-snapshot-load -no-snapshot-save -no-boot-anim -noaudio)
   if [[ "$HEADLESS" == 1 || -n "${CI:-}" ]]; then
