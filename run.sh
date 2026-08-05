@@ -75,9 +75,15 @@ else
   : "${LIVE_NOTIFICATION_DEEP_LINK:=}"
 fi
 : "${E2E_SINK_PORT:=0}"
+: "${E2E_SINK_START_TIMEOUT_SECONDS:=20}"
 export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL MAESTRO_APP_API_KEY
 : "${APP_ID:?APP_ID must be exported by the sample repo run.sh}"
 : "${PLATFORM:?PLATFORM must be exported by the sample repo run.sh (iOS or Android)}"
+
+if ! [[ "$E2E_SINK_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: E2E_SINK_START_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 
 BOOTED=""
 ANDROID_DEVICE=""
@@ -152,23 +158,33 @@ trap cleanup EXIT
 SINK_LOG="$OUT_DIR/sink.jsonl"
 SINK_PORT_FILE="$OUT_DIR/sink.port"
 rm -f "$SINK_PORT_FILE"
+unset E2E_SINK_BASE_URL
 python3 "$HARNESS_DIR/scripts/sink.py" "$SINK_LOG" \
   --port "$E2E_SINK_PORT" --port-file "$SINK_PORT_FILE" \
   >"$OUT_DIR/sink.stderr" 2>&1 &
 SINK_PID=$!
-for _ in $(seq 1 50); do
+SINK_START_DEADLINE=$((SECONDS + E2E_SINK_START_TIMEOUT_SECONDS))
+while (( SECONDS < SINK_START_DEADLINE )); do
   kill -0 "$SINK_PID" >/dev/null 2>&1 || break
   if [[ -s "$SINK_PORT_FILE" ]]; then
     RESOLVED_SINK_PORT=$(<"$SINK_PORT_FILE")
     E2E_SINK_BASE_URL="http://127.0.0.1:$RESOLVED_SINK_PORT"
-    if curl -s -o /dev/null "$E2E_SINK_BASE_URL/"; then break; fi
+    if curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null \
+      "$E2E_SINK_BASE_URL/" 2>/dev/null; then break; fi
   fi
   sleep 0.2
 done
 if ! kill -0 "$SINK_PID" >/dev/null 2>&1 \
   || [[ -z "${E2E_SINK_BASE_URL:-}" ]] \
-  || ! curl -s -o /dev/null "$E2E_SINK_BASE_URL/"; then
-  echo "error: local result sink failed to start; see $OUT_DIR/sink.stderr" >&2
+  || ! curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null "$E2E_SINK_BASE_URL/"; then
+  echo "error: local result sink failed to start within ${E2E_SINK_START_TIMEOUT_SECONDS}s" >&2
+  if [[ -s "$OUT_DIR/sink.stderr" ]]; then
+    echo "--- sink diagnostics ---" >&2
+    sed -n '1,80p' "$OUT_DIR/sink.stderr" >&2
+    echo "--- end sink diagnostics ---" >&2
+  else
+    echo "sink produced no diagnostics; process state: $(kill -0 "$SINK_PID" >/dev/null 2>&1 && echo running || echo exited)" >&2
+  fi
   exit 2
 fi
 export E2E_SINK_BASE_URL

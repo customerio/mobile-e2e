@@ -18,6 +18,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -46,6 +47,22 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+class LoopbackHTTPServer(HTTPServer):
+    """HTTP server that binds without reverse-resolving the loopback address.
+
+    HTTPServer.server_bind calls socket.getfqdn after binding. That lookup can
+    block indefinitely on hosted macOS runners even though this process only
+    needs a loopback listener. TCPServer performs the same socket bind without
+    the unrelated hostname lookup.
+    """
+
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -54,10 +71,12 @@ def main():
     args = ap.parse_args()
 
     open(args.out, "w").close()  # truncate
-    srv = HTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"sink binding to 127.0.0.1:{args.port}", file=sys.stderr, flush=True)
+    srv = LoopbackHTTPServer(("127.0.0.1", args.port), Handler)
     srv.out_path = args.out
     if args.port_file:
         Path(args.port_file).write_text(str(srv.server_port))
+    print(f"sink bound to 127.0.0.1:{srv.server_port}", file=sys.stderr, flush=True)
     print(f"sink listening on 127.0.0.1:{srv.server_port} -> {args.out}", flush=True)
     try:
         srv.serve_forever()

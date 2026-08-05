@@ -201,6 +201,12 @@ VALIDATION_MATRIX.md           # Reference for what's validatable via Maestro to
                                # configuration each row depends on.
 ```
 
+Run the harness regression checks without a simulator or emulator:
+
+```bash
+bash tests/run.sh
+```
+
 All flows are parameterized with `appId: ${APP_ID}` — each sample repo's
 `run.sh` passes its own bundle id via `maestro test -e APP_ID=...`.
 

@@ -114,6 +114,11 @@ note() {
   echo ">> $*"
 }
 
+# Kept in a small library so the hosted-emulator fallback can be exercised
+# without booting an Android device in a unit test.
+# shellcheck source=scripts/android_device.sh
+source "$HARNESS_DIR/scripts/android_device.sh"
+
 if [[ $# -gt 0 && ("$1" == "run" || "$1" == "doctor") ]]; then
   COMMAND="$1"
   shift
@@ -463,9 +468,7 @@ start_android_device() {
   emulator_bin=$(resolve_android_emulator) || die "Android emulator binary was not found"
   avd_name="${ANDROID_AVD_NAME:-Maestro_ANDROID_pixel_7_android-35}"
   if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
-    note "creating and starting Maestro Android virtual device"
-    maestro start-device --platform android --device-model pixel_7 --device-os android-35 \
-      >"$ARTIFACT_DIR/start-device.log" 2>&1 \
+    create_maestro_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/start-device.log" \
       || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
     local started
     started=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
