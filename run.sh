@@ -31,6 +31,21 @@ find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
 # Never leave a previous run's video looking like evidence for the current run
 # when capture or annotated rendering fails partway through.
 rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
+# Recovery bundles describe the previous attempt of the current top-level run.
+# The recovery wrappers re-enter this script with the same artifact directory;
+# retain the bundle they just captured during that nested invocation.
+if [[ "${E2E_RECOVERY_ATTEMPT:-0}" != 1 ]]; then
+  for recovery_dir in \
+    "$OUT_DIR/driver-recovery-attempt-1" \
+    "$OUT_DIR/device-recovery-attempt-1"; do
+    if [[ -L "$recovery_dir" || -f "$recovery_dir" ]]; then
+      rm -f "$recovery_dir"
+    elif [[ -d "$recovery_dir" ]]; then
+      find "$recovery_dir" -mindepth 1 -delete
+      rmdir "$recovery_dir"
+    fi
+  done
+fi
 
 # --- Env
 # The top-level runner has already applied caller > shared file > sample file
@@ -75,9 +90,15 @@ else
   : "${LIVE_NOTIFICATION_DEEP_LINK:=}"
 fi
 : "${E2E_SINK_PORT:=0}"
+: "${E2E_SINK_START_TIMEOUT_SECONDS:=20}"
 export MAESTRO_EXT_API_BASE_URL MAESTRO_LIVE_API_BASE_URL MAESTRO_APP_API_KEY
 : "${APP_ID:?APP_ID must be exported by the sample repo run.sh}"
 : "${PLATFORM:?PLATFORM must be exported by the sample repo run.sh (iOS or Android)}"
+
+if ! [[ "$E2E_SINK_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: E2E_SINK_START_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 
 BOOTED=""
 ANDROID_DEVICE=""
@@ -152,23 +173,33 @@ trap cleanup EXIT
 SINK_LOG="$OUT_DIR/sink.jsonl"
 SINK_PORT_FILE="$OUT_DIR/sink.port"
 rm -f "$SINK_PORT_FILE"
+unset E2E_SINK_BASE_URL
 python3 "$HARNESS_DIR/scripts/sink.py" "$SINK_LOG" \
   --port "$E2E_SINK_PORT" --port-file "$SINK_PORT_FILE" \
   >"$OUT_DIR/sink.stderr" 2>&1 &
 SINK_PID=$!
-for _ in $(seq 1 50); do
+SINK_START_DEADLINE=$((SECONDS + E2E_SINK_START_TIMEOUT_SECONDS))
+while (( SECONDS < SINK_START_DEADLINE )); do
   kill -0 "$SINK_PID" >/dev/null 2>&1 || break
   if [[ -s "$SINK_PORT_FILE" ]]; then
     RESOLVED_SINK_PORT=$(<"$SINK_PORT_FILE")
     E2E_SINK_BASE_URL="http://127.0.0.1:$RESOLVED_SINK_PORT"
-    if curl -s -o /dev/null "$E2E_SINK_BASE_URL/"; then break; fi
+    if curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null \
+      "$E2E_SINK_BASE_URL/" 2>/dev/null; then break; fi
   fi
   sleep 0.2
 done
 if ! kill -0 "$SINK_PID" >/dev/null 2>&1 \
   || [[ -z "${E2E_SINK_BASE_URL:-}" ]] \
-  || ! curl -s -o /dev/null "$E2E_SINK_BASE_URL/"; then
-  echo "error: local result sink failed to start; see $OUT_DIR/sink.stderr" >&2
+  || ! curl -fsS --connect-timeout 1 --max-time 2 -o /dev/null "$E2E_SINK_BASE_URL/"; then
+  echo "error: local result sink failed to start within ${E2E_SINK_START_TIMEOUT_SECONDS}s" >&2
+  if [[ -s "$OUT_DIR/sink.stderr" ]]; then
+    echo "--- sink diagnostics ---" >&2
+    sed -n '1,80p' "$OUT_DIR/sink.stderr" >&2
+    echo "--- end sink diagnostics ---" >&2
+  else
+    echo "sink produced no diagnostics; process state: $(kill -0 "$SINK_PID" >/dev/null 2>&1 && echo running || echo exited)" >&2
+  fi
   exit 2
 fi
 export E2E_SINK_BASE_URL
@@ -206,6 +237,13 @@ else
   rm -rf "$FRAMES_DIR" && mkdir -p "$FRAMES_DIR"
   "$HARNESS_DIR/scripts/capture_frames.sh" "$BOOTED" "$FRAMES_DIR" >"$OUT_DIR/capture.log" 2>&1 &
   REC_PID=$!
+  # Unified logging may discard debug/info entries before a post-run `log
+  # show`. Stream only Customer.io subsystems while the flow is active so a
+  # hosted failure retains identity, queue-fetch, and SSE lifecycle decisions.
+  xcrun simctl spawn "$BOOTED" log stream --style compact --level debug \
+    --predicate 'subsystem CONTAINS "customer"' \
+    >"$OUT_DIR/sdk-live.log" 2>&1 &
+  DEVICE_LOG_PID=$!
 fi
 
 # --- Run maestro.
@@ -267,6 +305,15 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   "$FLOW_PATH" | tee "$OUT_DIR/run.log"
 EXIT=$?
 set -e
+
+# Stop live device logging before artifact sanitization. Otherwise the log can
+# grow between redaction and the verification pass, leaving the uploaded copy
+# unverified or turning a green product run red.
+if [[ -n "$DEVICE_LOG_PID" ]]; then
+  kill "$DEVICE_LOG_PID" >/dev/null 2>&1 || true
+  wait "$DEVICE_LOG_PID" 2>/dev/null || true
+  DEVICE_LOG_PID=""
+fi
 
 # Maestro persists imported flow variables in commands-*.json. Scrub backend
 # API keys before the report renderer reads that JSON or CI can upload it.
@@ -337,14 +384,27 @@ python3 "$HARNESS_DIR/scripts/render_report.py" \
   || echo "warn: HTML evidence render failed"
 
 if [[ -f "$OUT_DIR/device.mp4" ]]; then
-  python3 "$HARNESS_DIR/scripts/render_video.py" \
-    --commands "$DEBUG_DIR"/commands-*.json \
-    --device "$OUT_DIR/device.mp4" \
-    --rec-started-ms "$REC_STARTED_AT_MS" \
-    --sink "$SINK_LOG" \
-    --title "$FLOW_NAME" \
-    --out "$OUT_DIR/annotated.mp4" \
-    || echo "warn: annotated video render failed"
+  COMMANDS_JSON=""
+  if [[ -d "$DEBUG_DIR" ]]; then
+    COMMANDS_JSON=$(find "$DEBUG_DIR" -maxdepth 1 -type f \
+      -name 'commands-*.json' -print -quit 2>/dev/null || true)
+    if [[ -z "$COMMANDS_JSON" ]]; then
+      COMMANDS_JSON=$(find "$DEBUG_DIR" -type f \
+        -name commands.json -print -quit 2>/dev/null || true)
+    fi
+  fi
+  if [[ -n "$COMMANDS_JSON" ]]; then
+    python3 "$HARNESS_DIR/scripts/render_video.py" \
+      --commands "$COMMANDS_JSON" \
+      --device "$OUT_DIR/device.mp4" \
+      --rec-started-ms "$REC_STARTED_AT_MS" \
+      --sink "$SINK_LOG" \
+      --title "$FLOW_NAME" \
+      --out "$OUT_DIR/annotated.mp4" \
+      || echo "warn: annotated video render failed"
+  else
+    echo "warn: annotated video render skipped; no Maestro commands JSON found"
+  fi
 fi
 
 python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$OUT_DIR"

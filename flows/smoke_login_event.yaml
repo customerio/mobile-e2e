@@ -41,11 +41,13 @@ name: Smoke — identify → custom event persisted
 # installation state are deliberately outside this cross-platform smoke gate.
 - runFlow:
     when:
-      visible: "Continue"
+      visible: ".*Thank you for choosing.*"
     commands:
       - assertVisible: ".*Thank you for choosing.*"
       - takeScreenshot: artifacts/smoke_01_modal
-      - tapOn: "Continue"
+      - tapOn:
+          text: "Continue"
+          optional: true
       - assertNotVisible: ".*Thank you for choosing.*"
 
 # --- Custom event with run_id for traceability ---
@@ -59,31 +61,44 @@ name: Smoke — identify → custom event persisted
 # field boundaries so it cannot cover the form halfway through entry.
 - runFlow:
     when:
-      visible: "Continue"
+      visible: ".*Thank you for choosing.*"
     commands:
       - takeScreenshot: artifacts/smoke_01_modal
-      - tapOn: "Continue"
-      - assertNotVisible: "Continue"
+      - tapOn:
+          text: "Continue"
+          optional: true
+      - assertNotVisible: ".*Thank you for choosing.*"
 - tapOn:
     id: "event_name_input"
 - inputText: "maestro_test_event"
+# Hosted campaign delivery can lag long enough to arrive after the immediate
+# field-boundary check. Give it one bounded final window before continuing with
+# the form so the modal cannot hide the property inputs.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
 - runFlow:
     when:
-      visible: "Continue"
+      visible: ".*Thank you for choosing.*"
     commands:
       - takeScreenshot: artifacts/smoke_01_modal
-      - tapOn: "Continue"
-      - assertNotVisible: "Continue"
+      - tapOn:
+          text: "Continue"
+          optional: true
+      - assertNotVisible: ".*Thank you for choosing.*"
 - tapOn:
     id: "property_name_input"
 - inputText: "run_id"
 - runFlow:
     when:
-      visible: "Continue"
+      visible: ".*Thank you for choosing.*"
     commands:
       - takeScreenshot: artifacts/smoke_01_modal
-      - tapOn: "Continue"
-      - assertNotVisible: "Continue"
+      - tapOn:
+          text: "Continue"
+          optional: true
+      - assertNotVisible: ".*Thank you for choosing.*"
 - tapOn:
     id: "property_value_input"
 - inputText: ${output.run_id}

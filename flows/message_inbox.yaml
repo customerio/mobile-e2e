@@ -1,7 +1,7 @@
 appId: ${APP_ID}
 tags:
   - message-inbox
-name: Message Inbox — backend, SDK data API, visual presentations, actions
+name: Message Inbox — backend, startup hydration, SDK data API, visual presentations, actions
 ---
 # Shared iOS/Android Inbox flow. INBOX_TRANSACTIONAL_MESSAGE_ID must reference
 # an active visual Inbox template (cio_inbox* topic and basic/image/cta type).
@@ -74,8 +74,26 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
       EXPECTED_OPENED: "false"
       REQUIRE_TITLE_BODY: "true"
       REQUIRE_VISUAL_RENDERABLE: "true"
-      MAX_WAIT_MS: "30000"
+      # Leave room for a retry when the hosted runner sees a transient Gist
+      # connection reset. A single request took 35 seconds in the failing run.
+      MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
+
+# The Gist queue is scoped to a process-level session id. The first iOS session
+# starts before this transactional message exists, inbox.getMessages() only
+# reads the SDK's current local state, and polling defaults to 600 seconds when
+# SSE is disabled. Immediate same-session refresh is therefore not part of this
+# suite's contract. Restart without clearing data to explicitly validate cold-
+# start hydration: the sample restores the same persisted SDK identity, Gist
+# creates a new session id, and startup fetches the existing delivery without
+# creating another customer or message.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - stopApp
+      - launchApp:
+          clearState: false
 
 # Identification can trigger an unrelated welcome in-app message after the
 # first, immediate dismissal check. Clear it again before navigating so it
@@ -103,15 +121,21 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
     commands:
       # XCUITest reports the clipped button's full frame just below the
       # dashboard scroll viewport, so scrollUntilVisible can false-positive.
-      # Move the scroll view explicitly before tapping the stable button id.
+      # Move the scroll view far enough to put the button above the fixed
+      # version-info footer before tapping the stable button id.
+      - swipe:
+          start: 50%, 70%
+          end: 50%, 35%
+          duration: 600
       - swipe:
           start: 50%, 70%
           end: 50%, 35%
           duration: 600
       - tapOn:
           id: "inbox_messages_button"
-          point: "10%,50%"
+          point: "50%,50%"
           retryTapIfNoChange: true
+          optional: true
 
 # The welcome campaign can finish loading during the dashboard-to-inbox
 # transition. Dismiss that last possible arrival before asserting/using the
@@ -119,6 +143,51 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
 - tapOn:
     text: "Continue"
     optional: true
+
+# If a late overlay intercepted the first tap, dismissing it leaves the
+# dashboard button visible. Re-tap only that UI control; do not replay the
+# transactional delivery or any backend assertion.
+- runFlow:
+    when:
+      platform: iOS
+      visible:
+        id: "inbox_messages_button"
+      notVisible:
+        id: "inbox_messages_list"
+    commands:
+      - tapOn:
+          id: "inbox_messages_button"
+          point: "50%,50%"
+          retryTapIfNoChange: true
+          optional: true
+
+# The welcome campaign can arrive after navigation and after the immediate
+# dismissal check. Give it one bounded final window before asserting the inbox
+# screen so it cannot hide an otherwise-successful SDK navigation.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- runFlow:
+    when:
+      visible: ".*Thank you for choosing.*"
+    commands:
+      - tapOn:
+          text: "Continue"
+          optional: true
+
+# Older/newer XCUITest accessibility projections can expose the dashboard
+# button by its visible label instead of the identifier assigned in code. Run
+# this only after all welcome-overlay recovery and keep it non-blocking.
+- runFlow:
+    when:
+      platform: iOS
+      notVisible:
+        id: "inbox_messages_list"
+    commands:
+      - tapOn:
+          text: "Inbox Messages"
+          optional: true
 
 - runFlow:
     when:
@@ -131,6 +200,7 @@ name: Message Inbox — backend, SDK data API, visual presentations, actions
     commands:
       - assertVisible:
           id: "inbox_messages_list"
+
 - extendedWaitUntil:
     visible: ".*${output.inbox_title_regex}.*"
     timeout: 15000

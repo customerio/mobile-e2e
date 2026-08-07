@@ -114,6 +114,13 @@ note() {
   echo ">> $*"
 }
 
+# Kept in a small library so the hosted-emulator fallback can be exercised
+# without booting an Android device in a unit test.
+# shellcheck source=scripts/android_device.sh
+source "$HARNESS_DIR/scripts/android_device.sh"
+# shellcheck source=scripts/ios_device.sh
+source "$HARNESS_DIR/scripts/ios_device.sh"
+
 if [[ $# -gt 0 && ("$1" == "run" || "$1" == "doctor") ]]; then
   COMMAND="$1"
   shift
@@ -462,11 +469,14 @@ start_android_device() {
   local emulator_bin avd_name
   emulator_bin=$(resolve_android_emulator) || die "Android emulator binary was not found"
   avd_name="${ANDROID_AVD_NAME:-Maestro_ANDROID_pixel_7_android-35}"
-  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
-    note "creating and starting Maestro Android virtual device"
-    maestro start-device --platform android --device-model pixel_7 --device-os android-35 \
-      >"$ARTIFACT_DIR/start-device.log" 2>&1 \
-      || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+  if ! android_avd_is_listed "$emulator_bin" "$avd_name"; then
+    if [[ "$HEADLESS" == 1 || -n "${CI:-}" ]]; then
+      create_headless_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/avdmanager.log" \
+        || die "could not create a registered Android AVD; see $ARTIFACT_DIR/avdmanager.log"
+    else
+      create_maestro_android_avd "$emulator_bin" "$avd_name" "$ARTIFACT_DIR/start-device.log" \
+        || die "Maestro could not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
+    fi
     local started
     started=$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ {print $1; exit}')
     if [[ -n "$started" ]]; then
@@ -477,10 +487,6 @@ start_android_device() {
       return
     fi
   fi
-  if ! "$emulator_bin" -list-avds | grep -Fxq "$avd_name"; then
-    avd_name=$("$emulator_bin" -list-avds | awk '/^Maestro_ANDROID_/ {print; exit}')
-  fi
-  [[ -n "$avd_name" ]] || die "Maestro did not create an Android AVD; see $ARTIFACT_DIR/start-device.log"
 
   local emulator_args=(-avd "$avd_name" -no-snapshot-load -no-snapshot-save -no-boot-anim -noaudio)
   if [[ "$HEADLESS" == 1 || -n "${CI:-}" ]]; then
@@ -495,39 +501,20 @@ start_android_device() {
 
 find_ios_device() {
   local preferred="${IOS_SIMULATOR_NAME:-}"
-  xcrun simctl list devices available -j | jq -r --arg preferred "$preferred" '
-    [.devices[][] | select(.isAvailable == true) | select(.name | startswith("iPhone"))] as $phones |
-    if $preferred != "" then
-      (($phones | map(select(.name == $preferred)))[0].udid // empty)
-    else
-      ((($phones | map(select(.name == "Maestro iPhone 17 Pro")))[0] //
-        ($phones | map(select(.name == "iPhone 17 Pro")))[0] //
-        $phones[0]).udid // empty)
-    end'
+  xcrun simctl list devices available -j | select_ios_device "$preferred"
 }
 
 start_ios_device() {
   require_command jq
-  local booted
-  booted=$(xcrun simctl list devices booted -j | jq -r \
-    '[.devices[][] | select(.state == "Booted") | select(.name | startswith("iPhone"))][0].udid // empty')
-  if [[ -n "$booted" ]]; then
+  local booted selected booted_devices
+  booted_devices=$(xcrun simctl list devices booted -j)
+  booted=$(printf '%s' "$booted_devices" | select_booted_ios_device)
+  if [[ -n "$booted" && "$KEEP_DEVICE" == 1 ]]; then
     DEVICE_ID="$booted"
-    if [[ "$KEEP_DEVICE" == 0 ]]; then
-      # Repeated XCUITest sessions can leave Simulator's text-input service in
-      # a state where Maestro reports inputText success but drops the value.
-      # A normal run favors determinism; --keep-device intentionally preserves
-      # the faster iteration behavior and the current visual state.
-      note "restarting iOS Simulator $booted for a clean automation session"
-      xcrun simctl shutdown "$booted"
-      xcrun simctl boot "$booted"
-      xcrun simctl bootstatus "$booted" -b
-    fi
     note "reusing iOS Simulator $booted"
     return
   fi
 
-  local selected
   selected=$(find_ios_device)
   if [[ -z "$selected" ]]; then
     if [[ -n "${IOS_SIMULATOR_NAME:-}" ]]; then
@@ -536,6 +523,19 @@ start_ios_device() {
     die "no available iPhone simulator was found; install an iOS runtime in Xcode"
   fi
   [[ -n "$selected" ]] || die "no compatible iOS Simulator is available"
+
+  if printf '%s' "$booted_devices" | ios_device_is_booted "$selected"; then
+    DEVICE_ID="$selected"
+    # Repeated XCUITest sessions can leave Simulator's text-input service in a
+    # state where Maestro reports inputText success but drops the value.
+    note "restarting iOS Simulator $selected for a clean automation session"
+    xcrun simctl shutdown "$selected"
+    xcrun simctl boot "$selected"
+    xcrun simctl bootstatus "$selected" -b
+    note "reusing iOS Simulator $selected"
+    return
+  fi
+
   xcrun simctl boot "$selected" 2>/dev/null || true
   xcrun simctl bootstatus "$selected" -b
   DEVICE_ID="$selected"
@@ -672,6 +672,10 @@ collect_device_logs() {
   fi
 }
 
+run_sample_maestro() {
+  (cd "$SAMPLE_ROOT" && PLATFORM="$1" bash "$HARNESS_DIR/run.sh" "$FLOW")
+}
+
 run_e2e() {
   local runner_platform
   if [[ "$SKIP_DOCTOR" == 0 ]]; then
@@ -697,9 +701,24 @@ run_e2e() {
   export E2E_ENV_PRELOADED=true
   note "running $FLOW on $DEVICE_ID"
   set +e
-  (cd "$SAMPLE_ROOT" && PLATFORM="$runner_platform" bash "$HARNESS_DIR/run.sh" "$FLOW")
+  run_sample_maestro "$runner_platform"
   local result=$?
   set -e
+  if [[ "$result" -ne 0 && "$PLATFORM" == "android" ]]; then
+    set +e
+    run_android_transport_recovery_once \
+      "$result" "$ARTIFACT_DIR" "$DEVICE_ID" \
+      run_sample_maestro "$runner_platform"
+    result=$?
+    set -e
+  elif [[ "$result" -ne 0 && "$PLATFORM" == "ios" ]]; then
+    set +e
+    run_ios_driver_recovery_once \
+      "$result" "$ARTIFACT_DIR" "$DEVICE_ID" \
+      run_sample_maestro "$runner_platform"
+    result=$?
+    set -e
+  fi
   collect_device_logs
   if ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$ARTIFACT_DIR" ||
      ! python3 "$HARNESS_DIR/scripts/redact_artifacts.py" --check "$ARTIFACT_DIR"; then

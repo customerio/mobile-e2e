@@ -4,7 +4,7 @@
 Usage:
   render_report.py <debug_output_dir> <out_html> [--screens-dir <dir>]
 
-Reads commands-*.json (per-step status), maestro.log (script output), and
+Reads Maestro command JSON (per-step status), maestro.log (script output), and
 inlines screenshots + the device screen recording if present.
 """
 import argparse
@@ -196,9 +196,35 @@ def find_screenshot(screens_dir: Path, base_name: str) -> Path | None:
 
 
 def find_failure_screenshot(debug_dir: Path) -> Path | None:
-    for p in debug_dir.glob("screenshot-*.png"):
-        return p
-    return None
+    candidates = list(debug_dir.rglob("screenshot-*.png"))
+    # Maestro 2.x stores failure images below a flow-named screenshots/
+    # directory and names them after the failed step.
+    candidates.extend(debug_dir.rglob("screenshots/*.png"))
+    if not candidates:
+        return None
+
+    def sort_key(path: Path) -> tuple[int, int, str]:
+        step_match = re.search(r"step-(\d+)", path.name)
+        step_number = int(step_match.group(1)) if step_match else -1
+        return path.stat().st_mtime_ns, step_number, path.as_posix()
+
+    # A failing run can contain screenshots for earlier recovered commands.
+    # Prefer the newest file and then the highest numeric step when an
+    # extracted archive gives every image the same timestamp.
+    return max(
+        set(candidates),
+        key=sort_key,
+    )
+
+
+def find_commands_json(debug_dir: Path) -> Path | None:
+    """Find command output from either Maestro's legacy or 2.x layout."""
+    legacy = sorted(debug_dir.glob("commands-*.json"))
+    if legacy:
+        return legacy[0]
+
+    nested = sorted(debug_dir.rglob("commands.json"))
+    return nested[0] if nested else None
 
 
 def extract_script_log(maestro_log: Path) -> list[str]:
@@ -226,10 +252,9 @@ def main():
     out = Path(args.out)
     screens_dir = Path(args.screens_dir) if args.screens_dir else debug.parent
 
-    # Load the first commands-*.json
-    cj = next(iter(sorted(debug.glob("commands-*.json"))), None)
+    cj = find_commands_json(debug)
     if not cj:
-        print(f"No commands-*.json found in {debug}", file=sys.stderr)
+        print(f"No Maestro commands JSON found in {debug}", file=sys.stderr)
         return 2
     commands = json.loads(cj.read_text())
     commands.sort(key=lambda c: c.get("metadata", {}).get("timestamp", 0))
@@ -493,7 +518,7 @@ def main():
         html_steps.append('</ol>')
 
     fail_block = ""
-    if fail_screenshot:
+    if not overall_pass and fail_screenshot:
         fail_block = (
             f'<section class="card"><h2>Screen at failure</h2>'
             f'<img class="failshot" src="{fail_screenshot}"></section>'
@@ -507,6 +532,7 @@ def main():
 
     pass_count = by_status.get("COMPLETED", 0)
     fail_count = by_status.get("FAILED", 0)
+    warn_count = by_status.get("WARNED", 0)
     skip_count = by_status.get("SKIPPED", 0)
 
     setup_banner = ""
@@ -573,6 +599,7 @@ video {{ max-width: 100%; max-height: 560px; background:#000; border-radius:4px;
   <div class="stat"><b>{total}</b><span>total</span></div>
   <div class="stat" style="background:#f0fff4"><b style="color:#1f9d55">{pass_count}</b><span>passed</span></div>
   <div class="stat" style="background:#fff5f5"><b style="color:#cc1f1a">{fail_count}</b><span>failed</span></div>
+  <div class="stat" style="background:#fffaf0"><b style="color:#dd6b20">{warn_count}</b><span>warned</span></div>
   <div class="stat" style="background:#f7fafc"><b style="color:#718096">{skip_count}</b><span>skipped</span></div>
 </div>
 <main>

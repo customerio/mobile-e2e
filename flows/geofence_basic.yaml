@@ -87,6 +87,21 @@ name: Geofence — outside → inside → backend transition
       visible: "Continue"
     commands:
       - tapOn: "Continue"
+# The welcome campaign can arrive after navigation even when both dashboard
+# dismissal windows were clear. Give that late overlay one bounded window so
+# it cannot hide the destination assertion or intercept the SDK-location
+# control underneath it.
+- runScript:
+    file: ../scripts/wait.js
+    env:
+      WAIT_MS: "3000"
+- runFlow:
+    when:
+      visible: ".*Thank you for choosing.*"
+    commands:
+      - tapOn:
+          text: "Continue"
+          optional: true
 - assertVisible: "^Location Test$"
 - scrollUntilVisible:
     element:
