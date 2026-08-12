@@ -120,6 +120,9 @@ note() {
 source "$HARNESS_DIR/scripts/android_device.sh"
 # shellcheck source=scripts/ios_device.sh
 source "$HARNESS_DIR/scripts/ios_device.sh"
+# shellcheck source=scripts/version.sh
+# shellcheck disable=SC1091
+source "$HARNESS_DIR/scripts/version.sh"
 
 if [[ $# -gt 0 && ("$1" == "run" || "$1" == "doctor") ]]; then
   COMMAND="$1"
@@ -411,6 +414,14 @@ validate_backend() {
 
 doctor() {
   require_command maestro
+  local maestro_version_output maestro_version
+  if ! maestro_version_output=$(maestro --version 2>&1); then
+    die "could not determine the installed Maestro CLI version"
+  fi
+  maestro_version=$(extract_semantic_version "$maestro_version_output") \
+    || die "could not parse the installed Maestro CLI version: $maestro_version_output"
+  semantic_version_at_least "$maestro_version" "2.6.0" \
+    || die "Maestro CLI 2.6.0 or newer is required (found $maestro_version)"
   require_command curl
   require_command python3
   require_command ffmpeg

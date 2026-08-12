@@ -19,6 +19,11 @@ name: Smoke — identify → custom event persisted
 - launchApp:
     clearState: true
 
+- runFlow:
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
+
 # --- Login ---
 - assertVisible:
     id: "login_button"
@@ -32,9 +37,6 @@ name: Smoke — identify → custom event persisted
 - hideKeyboard
 - tapOn:
     id: "login_button"
-
-- assertVisible:
-    id: "custom_event_button"
 
 # --- Visual proof when a workspace welcome campaign is eligible ---
 # Rendering is conditional because campaign configuration, eligibility, and
@@ -50,13 +52,59 @@ name: Smoke — identify → custom event persisted
           optional: true
       - assertNotVisible: ".*Thank you for choosing.*"
 
+# If the modal starts rendering between the conditional snapshot and the next
+# assertion, this bounded optional tap catches that late arrival. Then wait for
+# the real dashboard control rather than treating an overlay as an SDK failure.
+- retry:
+    maxRetries: 1
+    commands:
+      - runFlow:
+          when:
+            visible: ".*Thank you for choosing.*"
+          commands:
+            - takeScreenshot: artifacts/smoke_01_modal
+            - tapOn:
+                text: "Continue"
+                optional: true
+      - extendedWaitUntil:
+          visible:
+            id: "custom_event_button"
+          timeout: 15000
+
 # --- Custom event with run_id for traceability ---
-- tapOn:
-    id: "custom_event_button"
-- extendedWaitUntil:
-    visible:
-      id: "event_name_input"
-    timeout: 10000
+# Keep navigation inside the bounded retry. If a late welcome modal covers the
+# first tap, the second attempt dismisses it and safely retries navigation. If
+# navigation already succeeded, the button is absent and only readiness waits.
+- retry:
+    maxRetries: 1
+    commands:
+      - runFlow:
+          when:
+            visible: ".*Thank you for choosing.*"
+          commands:
+            - takeScreenshot: artifacts/smoke_01_modal
+            - tapOn:
+                text: "Continue"
+                optional: true
+      - runFlow:
+          when:
+            visible:
+              id: "custom_event_button"
+          commands:
+            - tapOn:
+                id: "custom_event_button"
+      - runFlow:
+          when:
+            visible: ".*Thank you for choosing.*"
+          commands:
+            - takeScreenshot: artifacts/smoke_01_modal
+            - tapOn:
+                text: "Continue"
+                optional: true
+      - extendedWaitUntil:
+          visible:
+            id: "event_name_input"
+          timeout: 10000
 # A welcome campaign can arrive asynchronously after navigation. Re-check at
 # field boundaries so it cannot cover the form halfway through entry.
 - runFlow:

@@ -148,6 +148,9 @@ Remote-lane failures are deliberately diagnostic:
 
 ```
 flows/
+  shared/
+    android_startup_ready.yaml # Android launcher-ANR recovery plus a bounded
+                               # wait for the caller's STARTUP_READY_ID.
   campaign_141.yaml            # Full E2E loop: SDK identify → backend → campaign
                                # 141 → in-app + inline + push, with visual proof
                                # of the push notification.
@@ -239,6 +242,10 @@ maestro test .maestro/harness/flows/campaign_141.yaml
 The flow's `runScript: file: ../scripts/...` references resolve to
 `harness/scripts/` naturally.
 
+If a sample repo supplies a local `.maestro/<flow>.yaml` override that calls a
+shared subflow, it must also vendor that subflow at the same relative path under
+`.maestro/` because Maestro resolves `runFlow.file` relative to the caller.
+
 For a full local run, prefer the top-level `./e2e` command because it also owns
 device provisioning, SDK build/install, permissions, backend preflight, logs,
 and artifact placement. The sample `.maestro/run.sh` remains useful when an app
@@ -259,7 +266,7 @@ is already installed on a booted device.
 - Java 17 and the SDK repo's normal build prerequisites
 - Python 3; Pillow is optional but required for annotated MP4 rendering
 - `ffmpeg` on PATH (video assembly + annotated composite)
-- `maestro` CLI
+- Maestro CLI 2.6.0 or newer
 - Customer.io App API key in `MAESTRO_APP_API_KEY`; the same credential is used
   for Ext API assertions, Inbox sends, and remote Live Notifications operations
 - Published transactional Inbox template with non-empty `properties.title` and
@@ -281,11 +288,10 @@ Jist dismiss action, and proves queue removal. The template must contain a
 `cio_inbox*` topic and `type` equal to `basic`, `image`, or `cta`; the pre-render
 queue assertion fails explicitly when the fixture is incompatible.
 
-On iOS, the data-API portion explicitly validates cold-start hydration after
-the backend delivery. `inbox.getMessages()` reads local SDK state and the
-non-SSE polling interval defaults to 600 seconds, so the suite does not claim
-immediate same-session refresh coverage. Android currently reaches the same
-assertions without a process restart.
+On both platforms, the data-API portion explicitly validates cold-start
+hydration after the backend delivery. `inbox.getMessages()` reads local SDK
+state and the non-SSE polling interval defaults to 600 seconds, so the suite
+does not claim immediate same-session refresh coverage.
 
 ## CI
 

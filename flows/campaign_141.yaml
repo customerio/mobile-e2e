@@ -32,6 +32,11 @@ name: E2E — Campaign 141 full loop with real push delivery
 - launchApp:
     clearState: true
 
+- runFlow:
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
+
 # --- Login ---
 - assertVisible:
     id: "login_button"
