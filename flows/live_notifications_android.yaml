@@ -17,6 +17,11 @@ name: Android Live Notifications — local lifecycle and remote FCM delivery
 - launchApp:
     clearState: false
 
+- runFlow:
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
+
 # Give Firebase token initialization a head start before the dashboard reads it.
 - runScript:
     file: ../scripts/wait.js

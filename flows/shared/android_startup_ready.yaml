@@ -1,0 +1,40 @@
+appId: ${APP_ID}
+name: Android startup readiness
+env:
+  DISMISS_WELCOME_MODAL: ${DISMISS_WELCOME_MODAL || "false"}
+---
+# A fresh hosted Android emulator can show a Pixel Launcher ANR over an app
+# that has already launched successfully. Dismiss only that system dialog, then
+# wait for the caller's expected app control instead of hiding a real app crash
+# behind a broad flow retry or a longer fixed sleep.
+#
+# Required environment:
+#   STARTUP_READY_ID — accessibility/resource id expected after app startup.
+# Optional environment:
+#   DISMISS_WELCOME_MODAL — set to "true" after an identified-user relaunch.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - retry:
+          # Retry this small readiness block once if a system or campaign
+          # overlay arrives after the first check but before readiness.
+          maxRetries: 1
+          commands:
+            - runFlow:
+                when:
+                  visible: ".*Launcher isn't responding"
+                commands:
+                  - tapOn: "Close app"
+            - runFlow:
+                when:
+                  true: ${DISMISS_WELCOME_MODAL == "true"}
+                  visible: ".*Thank you for choosing.*"
+                commands:
+                  - tapOn:
+                      text: "Continue"
+                      optional: true
+            - extendedWaitUntil:
+                visible:
+                  id: ${STARTUP_READY_ID}
+                timeout: 10000

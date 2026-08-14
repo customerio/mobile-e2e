@@ -27,13 +27,10 @@ name: Geofence — outside → inside → backend transition
     latitude: ${GEOFENCE_OUTSIDE_LATITUDE}
     longitude: ${GEOFENCE_OUTSIDE_LONGITUDE}
 
-# A freshly created Google APIs image can surface a one-time launcher ANR while
-# Play services finish cold-start work. It is infrastructure noise, not app UI.
 - runFlow:
-    when:
-      visible: ".*Launcher isn't responding"
-    commands:
-      - tapOn: "Close app"
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
 
 # --- Identify a unique customer ---
 - assertVisible:
@@ -148,6 +145,11 @@ name: Geofence — outside → inside → backend transition
       - stopApp
       - launchApp:
           clearState: false
+      - runFlow:
+          file: shared/android_startup_ready.yaml
+          env:
+            STARTUP_READY_ID: "custom_event_button"
+            DISMISS_WELCOME_MODAL: "true"
       - runScript:
           file: ../scripts/wait.js
           env:

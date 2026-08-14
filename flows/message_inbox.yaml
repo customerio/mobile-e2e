@@ -25,6 +25,11 @@ name: Message Inbox — backend, startup hydration, SDK data API, visual present
       - launchApp:
           clearState: false
 
+- runFlow:
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
+
 # --- Identify a fresh customer ---
 - assertVisible:
     id: "login_button"
@@ -79,7 +84,7 @@ name: Message Inbox — backend, startup hydration, SDK data API, visual present
       MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# The Gist queue is scoped to a process-level session id. The first iOS session
+# The Gist queue is scoped to a process-level session id. The first app session
 # starts before this transactional message exists, inbox.getMessages() only
 # reads the SDK's current local state, and polling defaults to 600 seconds when
 # SSE is disabled. Immediate same-session refresh is therefore not part of this
@@ -94,6 +99,18 @@ name: Message Inbox — backend, startup hydration, SDK data API, visual present
       - stopApp
       - launchApp:
           clearState: false
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - stopApp
+      - launchApp:
+          clearState: false
+      - runFlow:
+          file: shared/android_startup_ready.yaml
+          env:
+            STARTUP_READY_ID: "custom_event_button"
+            DISMISS_WELCOME_MODAL: "true"
 
 # Identification can trigger an unrelated welcome in-app message after the
 # first, immediate dismissal check. Clear it again before navigating so it

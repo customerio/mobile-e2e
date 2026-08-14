@@ -21,6 +21,11 @@ name: Inline in-app — render + position template
 - launchApp:
     clearState: true
 
+- runFlow:
+    file: shared/android_startup_ready.yaml
+    env:
+      STARTUP_READY_ID: "login_button"
+
 # --- Login ---
 - assertVisible:
     id: "login_button"
