@@ -105,36 +105,50 @@ name: Smoke — identify → custom event persisted
           visible:
             id: "event_name_input"
           timeout: 10000
-# A welcome campaign can arrive asynchronously after navigation. Re-check at
-# field boundaries so it cannot cover the form halfway through entry.
-- runFlow:
-    when:
-      visible: ".*Thank you for choosing.*"
+# A welcome campaign can arrive asynchronously after navigation, including
+# mid-way through the tap-then-type pair below rather than only between
+# commands. When GistModalActivity launches and is dismissed over this field,
+# the underlying EditText can come back empty even though the tap and input
+# each reported success (see MBL-2298). Rather than trust that entry landed,
+# verify the field's actual contents afterward and retry the whole
+# tap/type/dismiss sequence if it didn't - this is correct regardless of
+# whether the root cause is a focus race on the tap or state loss from the
+# modal activity's lifecycle.
+- retry:
+    maxRetries: 2
     commands:
-      - takeScreenshot: artifacts/smoke_01_modal
+      - runFlow:
+          when:
+            visible: ".*Thank you for choosing.*"
+          commands:
+            - takeScreenshot: artifacts/smoke_01_modal
+            - tapOn:
+                text: "Continue"
+                optional: true
+            - assertNotVisible: ".*Thank you for choosing.*"
       - tapOn:
-          text: "Continue"
-          optional: true
-      - assertNotVisible: ".*Thank you for choosing.*"
-- tapOn:
-    id: "event_name_input"
-- inputText: "maestro_test_event"
-# Hosted campaign delivery can lag long enough to arrive after the immediate
-# field-boundary check. Give it one bounded final window before continuing with
-# the form so the modal cannot hide the property inputs.
-- runScript:
-    file: ../scripts/wait.js
-    env:
-      WAIT_MS: "3000"
-- runFlow:
-    when:
-      visible: ".*Thank you for choosing.*"
-    commands:
-      - takeScreenshot: artifacts/smoke_01_modal
-      - tapOn:
-          text: "Continue"
-          optional: true
-      - assertNotVisible: ".*Thank you for choosing.*"
+          id: "event_name_input"
+      - inputText: "maestro_test_event"
+      # Hosted campaign delivery can lag long enough to arrive after the
+      # immediate field-boundary check. Give it one bounded final window
+      # before continuing with the form so the modal cannot hide the
+      # property inputs.
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "3000"
+      - runFlow:
+          when:
+            visible: ".*Thank you for choosing.*"
+          commands:
+            - takeScreenshot: artifacts/smoke_01_modal
+            - tapOn:
+                text: "Continue"
+                optional: true
+            - assertNotVisible: ".*Thank you for choosing.*"
+      - assertVisible:
+          id: "event_name_input"
+          text: "maestro_test_event"
 - tapOn:
     id: "property_name_input"
 - inputText: "run_id"
