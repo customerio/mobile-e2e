@@ -152,8 +152,8 @@ flows/
     android_startup_ready.yaml # Android launcher-ANR recovery plus a bounded
                                # wait for the caller's STARTUP_READY_ID.
   campaign_141.yaml            # Full E2E loop: SDK identify → backend → campaign
-                               # 141 → in-app + inline + push, with visual proof
-                               # of the push notification.
+                               # 141 → delivered push → notification tap → opened,
+                               # plus the campaign's in-app and inline actions.
   smoke_login_event.yaml       # Smoke: identify → optional welcome modal →
                                # exact run-correlated custom event persisted.
   geofence_basic.yaml          # Always permission → outside location → registered
@@ -239,6 +239,11 @@ is pointed at the shared flow:
 maestro test .maestro/harness/flows/campaign_141.yaml
 ```
 
+`campaign_141.yaml` is an integration flow whose supported entrypoint is the
+top-level `./e2e run --platform <android|ios> --suite campaign` command. It needs
+the runner's fresh install and device/backend preflight; the raw Maestro command
+above is only appropriate when those prerequisites have already been reproduced.
+
 The flow's `runScript: file: ../scripts/...` references resolve to
 `harness/scripts/` naturally.
 
@@ -248,8 +253,10 @@ shared subflow, it must also vendor that subflow at the same relative path under
 
 For a full local run, prefer the top-level `./e2e` command because it also owns
 device provisioning, SDK build/install, permissions, backend preflight, logs,
-and artifact placement. The sample `.maestro/run.sh` remains useful when an app
-is already installed on a booted device.
+and artifact placement. The sample `.maestro/run.sh` remains useful for flows
+whose install and backend prerequisites have already been reproduced. Login
+flows such as `smoke_login_event.yaml` and `campaign_141.yaml` expect a clean
+sample-app installation.
 
 ## What stays in each sample repo
 

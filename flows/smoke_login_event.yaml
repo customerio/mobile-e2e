@@ -16,8 +16,20 @@ name: Smoke — identify → custom event persisted
 - runScript:
     file: ../scripts/setup_run.js
 
-- launchApp:
-    clearState: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      # The one-command runner already uninstalls and reinstalls the iOS app.
+      # Avoid a second reinstall and its CoreSimulator foreground race.
+      - launchApp:
+          clearState: false
 
 - runFlow:
     file: shared/android_startup_ready.yaml
