@@ -82,6 +82,16 @@ name: E2E — Campaign 141 full loop with real push delivery
     id: "custom_event_button"
 - takeScreenshot: artifacts/c141_02_dashboard
 
+# An identify-time modal can arrive just after the dashboard becomes visible.
+# Dismiss it before trying to reach the dashboard's push-permission action.
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+      - waitForAnimationToEnd:
+          timeout: 2000
+
 # --- Require push permission before triggering the campaign ---
 # Both native samples expose the same dashboard action. Explicitly request
 # notification authorization, then accept the system prompt when the OS shows
@@ -216,8 +226,8 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_09_inline_c
 
 # Leave the app on a known screen before opening the system notification surface.
-# This makes the post-tap dashboard assertion prove app re-entry rather than depend
-# on whichever optional campaign screen happened to be visible.
+# This keeps the post-tap screenshot independent of whichever optional campaign
+# screen happened to be visible.
 - runFlow:
     when:
       notVisible:
@@ -225,15 +235,28 @@ name: E2E — Campaign 141 full loop with real push delivery
     commands:
       - runFlow:
           when:
-            platform: Android
+            visible: "Continue"
           commands:
-            - back
+            - tapOn: "Continue"
+            - waitForAnimationToEnd:
+                timeout: 2000
       - runFlow:
           when:
-            platform: iOS
+            notVisible:
+              id: "custom_event_button"
           commands:
-            - tapOn:
-                id: "BackButton"
+            - runFlow:
+                when:
+                  platform: Android
+                commands:
+                  - back
+            - runFlow:
+                when:
+                  platform: iOS
+                commands:
+                  - tapOn:
+                      id: "BackButton"
+                      optional: true
 - extendedWaitUntil:
     visible:
       id: "custom_event_button"
@@ -270,7 +293,8 @@ name: E2E — Campaign 141 full loop with real push delivery
 - tapOn: "Maestro Push"
 - waitForAnimationToEnd:
     timeout: 4000
-# App-returned-to-known-screen is the proof the push tap opened the app.
+# Return to the known app screen for visual evidence. The exact opened metric
+# below is the proof that this notification tap was attributed.
 - extendedWaitUntil:
     visible:
       id: "custom_event_button"
