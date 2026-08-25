@@ -17,8 +17,7 @@ name: E2E — Campaign 141 full loop with real push delivery
 # notification center vs notification shade) are handled via
 # `when: platform:` conditions — per Maestro's official pattern.
 # Run this integration flow through `./e2e run --suite campaign`. It relies on
-# that runner's fresh install and on Android API 33 or newer so notification
-# authorization starts in the system-prompt state.
+# that runner's fresh install and device/backend preflight.
 #
 #   SDK identify+track
 #     → backend routes
@@ -84,27 +83,18 @@ name: E2E — Campaign 141 full loop with real push delivery
 - takeScreenshot: artifacts/c141_02_dashboard
 
 # --- Require push permission before triggering the campaign ---
-# Both native samples expose the same dashboard action. A fresh one-command run
-# has no notification authorization yet, so explicitly request it instead of
-# hoping a prompt appears on its own.
+# Both native samples expose the same dashboard action. Explicitly request
+# notification authorization, then accept the system prompt when the OS shows
+# one. Exact delivered evidence below is the readiness gate.
 - scrollUntilVisible:
     element:
       text: "^Show Push Prompt$"
     direction: DOWN
     timeout: 10000
 - tapOn: "^Show Push Prompt$"
-- extendedWaitUntil:
-    visible: "Allow"
-    timeout: 10000
-- tapOn: "Allow"
-- scrollUntilVisible:
-    element:
-      text: "^Email:$"
-    direction: UP
-    timeout: 10000
-- extendedWaitUntil:
-    notVisible: "^Not Registered$"
-    timeout: 20000
+- tapOn:
+    text: "^Allow$"
+    optional: true
 - scrollUntilVisible:
     element:
       id: "custom_event_button"
@@ -199,19 +189,6 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Backend assertion #3: this push reached the device ---
-# Keep this after the in-app assertion so `output.message_id` remains the push
-# delivery id until the opened check below.
-- runScript:
-    file: ../scripts/assert_message_delivered.js
-    env:
-      RUN_EMAIL: ${output.email}
-      EXPECTED_TYPE: "push"
-      MIN_METRIC: "delivered"
-      CAMPAIGN_ID: "141"
-      MAX_WAIT_MS: "60000"
-- assertTrue: ${output.assert_ok === "true"}
-
 # --- Dismiss any modal Campaign 141 raised ---
 - runFlow:
     when:
@@ -246,7 +223,17 @@ name: E2E — Campaign 141 full loop with real push delivery
       notVisible:
         id: "custom_event_button"
     commands:
-      - tapOn: "Back Button"
+      - runFlow:
+          when:
+            platform: Android
+          commands:
+            - back
+      - runFlow:
+          when:
+            platform: iOS
+          commands:
+            - tapOn:
+                id: "BackButton"
 - extendedWaitUntil:
     visible:
       id: "custom_event_button"
@@ -261,9 +248,25 @@ name: E2E — Campaign 141 full loop with real push delivery
     duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
-- assertVisible: "Maestro Push"
+- extendedWaitUntil:
+    visible: "Maestro Push"
+    timeout: 60000
 - assertVisible: "MAESTRO_PUSH_OK"
 - takeScreenshot: artifacts/c141_04_push_in_shade
+
+# --- Backend assertion #3: this visible push reported delivery ---
+# Keep this after the in-app assertion so `output.message_id` remains the push
+# delivery id until the opened check below.
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "delivered"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "60000"
+- assertTrue: ${output.assert_ok === "true"}
+
 - tapOn: "Maestro Push"
 - waitForAnimationToEnd:
     timeout: 4000

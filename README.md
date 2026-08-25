@@ -253,8 +253,10 @@ shared subflow, it must also vendor that subflow at the same relative path under
 
 For a full local run, prefer the top-level `./e2e` command because it also owns
 device provisioning, SDK build/install, permissions, backend preflight, logs,
-and artifact placement. The sample `.maestro/run.sh` remains useful when an app
-is already installed on a booted device.
+and artifact placement. The sample `.maestro/run.sh` remains useful for flows
+whose install and backend prerequisites have already been reproduced. Login
+flows such as `smoke_login_event.yaml` and `campaign_141.yaml` expect a clean
+sample-app installation.
 
 ## What stays in each sample repo
 
