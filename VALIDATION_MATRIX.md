@@ -51,7 +51,11 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | Inbox visual rendering and CTA | Send a second isolated delivery, require a visual-compatible server payload, render it first in a dedicated full-screen SDK Inbox and then through the optional bell/sheet overlay, match the same queue title/body and published CTA in both Jist presentations, require the exact delivery's opened metric, tap its dismiss action, then require stable queue absence |
 | iOS local Live Activity visual lifecycle | Drive the registered Segments, Delivery, and Countdown examples through start/update/end; require one stable ActivityKit and Customer.io instance per template; assert active/final Lock Screen content; tap the card and verify widget-URL re-entry to the Live Activities screen; save each state as evidence |
 
-### 🧪 Opt-in integration coverage
+### 🧪 Implemented opt-in integration flows
+
+These checks run only when their focused suite is selected and its prerequisites
+are provisioned. They are not claims that the current hosted virtual-device lanes
+have produced passing APNs or FCM evidence; record that evidence separately.
 
 | Case | How | Prerequisites |
 |---|---|---|
@@ -59,8 +63,8 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | iOS backend push-to-start | Call `/v1/live_notifications/start`, poll status to `sent`, then match the unique run id in ActivityKit; successful delivery proves the SDK's consumed push-to-start registration reached Customer.io | Live Notifications plan, App API key, configured APNs sandbox key, supported Simulator host, and the dedicated `Live Notification Token` CDP action |
 | iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
 | Remote Live Activity system surface | Background the app after remote updates and capture the Simulator system presentation | Dynamic Island-capable Simulator model |
-| Generic push delivery | Fire Campaign 141 with an exact run-correlated event, require `metrics.delivered`, and assert the notification in the system surface | The seeded Campaign 141, valid APNs sandbox or FCM credentials, and a supported simulator, emulator, or device |
-| Generic push tap and open tracking | Tap that notification, require the sample's known dashboard, then require `metrics.opened` for the same fresh profile and campaign | Same as above, with a push deep link that returns to the sample |
+| Generic push delivery | Fire Campaign 141 with an exact run-correlated event, require `metrics.delivered`, and assert the notification in the system surface | Explicitly select the `campaign` suite through the one-command runner; a fresh install, Android API 33+ when testing Android, the seeded Campaign 141, valid APNs sandbox or FCM credentials, and a supported local simulator, emulator, or device |
+| Generic push tap and open tracking | Return the sample to its dashboard, tap that notification, then require `metrics.opened` for the same exact push delivery | Same as above; this verifies app re-entry and Customer.io attribution, not a platform-specific deep-link destination. The current hosted CI choices do not include this suite. |
 
 The remote iOS lane also validates the final outcome of device registration: a
 successful push-to-start for a fresh SDK-identified profile proves that services

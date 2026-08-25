@@ -16,18 +16,20 @@ name: Smoke — identify → custom event persisted
 - runScript:
     file: ../scripts/setup_run.js
 
-- launchApp:
-    clearState: true
-
-# Maestro 2.6 can leave a freshly reinstalled iOS app behind SpringBoard even
-# though launchApp reports success. Bring that same process to the foreground;
-# this does not clear state again and is a no-op on Android.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
 - runFlow:
     when:
       platform: iOS
     commands:
+      # The one-command runner already uninstalls and reinstalls the iOS app.
+      # Avoid a second reinstall and its CoreSimulator foreground race.
       - launchApp:
-          stopApp: false
+          clearState: false
 
 - runFlow:
     file: shared/android_startup_ready.yaml

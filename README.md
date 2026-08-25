@@ -239,6 +239,11 @@ is pointed at the shared flow:
 maestro test .maestro/harness/flows/campaign_141.yaml
 ```
 
+`campaign_141.yaml` is an integration flow whose supported entrypoint is the
+top-level `./e2e run --platform <android|ios> --suite campaign` command. It needs
+the runner's fresh install and device/backend preflight; the raw Maestro command
+above is only appropriate when those prerequisites have already been reproduced.
+
 The flow's `runScript: file: ../scripts/...` references resolve to
 `harness/scripts/` naturally.
 

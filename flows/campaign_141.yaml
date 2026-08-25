@@ -16,6 +16,9 @@ name: E2E — Campaign 141 full loop with real push delivery
 # platforms. Platform-specific bits (hardware back vs edge swipe,
 # notification center vs notification shade) are handled via
 # `when: platform:` conditions — per Maestro's official pattern.
+# Run this integration flow through `./e2e run --suite campaign`. It relies on
+# that runner's fresh install and on Android API 33 or newer so notification
+# authorization starts in the system-prompt state.
 #
 #   SDK identify+track
 #     → backend routes
@@ -29,18 +32,21 @@ name: E2E — Campaign 141 full loop with real push delivery
 - runScript:
     file: ../scripts/setup_run.js
 
-- launchApp:
-    clearState: true
-
-# Maestro 2.6 can leave a freshly reinstalled iOS app behind SpringBoard even
-# though launchApp reports success. Bring that same process to the foreground;
-# this does not clear state again and is a no-op on Android.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
 - runFlow:
     when:
       platform: iOS
     commands:
+      # The one-command runner already uninstalls and reinstalls the iOS app.
+      # Clearing state here would reinstall it again and can leave SpringBoard
+      # in front during a CoreSimulator race.
       - launchApp:
-          stopApp: false
+          clearState: false
 
 - runFlow:
     file: shared/android_startup_ready.yaml
@@ -77,12 +83,35 @@ name: E2E — Campaign 141 full loop with real push delivery
     id: "custom_event_button"
 - takeScreenshot: artifacts/c141_02_dashboard
 
-# --- Grant push permission if the system prompt appears ---
-- runFlow:
-    when:
-      visible: "Allow"
-    commands:
-      - tapOn: "Allow"
+# --- Require push permission before triggering the campaign ---
+# Both native samples expose the same dashboard action. A fresh one-command run
+# has no notification authorization yet, so explicitly request it instead of
+# hoping a prompt appears on its own.
+- scrollUntilVisible:
+    element:
+      text: "^Show Push Prompt$"
+    direction: DOWN
+    timeout: 10000
+- tapOn: "^Show Push Prompt$"
+- extendedWaitUntil:
+    visible: "Allow"
+    timeout: 10000
+- tapOn: "Allow"
+- scrollUntilVisible:
+    element:
+      text: "^Email:$"
+    direction: UP
+    timeout: 10000
+- extendedWaitUntil:
+    notVisible: "^Not Registered$"
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "custom_event_button"
+    direction: UP
+    timeout: 10000
+- assertVisible:
+    id: "custom_event_button"
 
 # If another in-app modal was queued (multiple campaigns around identify),
 # dismiss it before firing the campaign-141 trigger event.
@@ -159,18 +188,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Backend assertion #2: push reached the device ---
-- runScript:
-    file: ../scripts/assert_message_delivered.js
-    env:
-      RUN_EMAIL: ${output.email}
-      EXPECTED_TYPE: "push"
-      MIN_METRIC: "delivered"
-      CAMPAIGN_ID: "141"
-      MAX_WAIT_MS: "60000"
-- assertTrue: ${output.assert_ok === "true"}
-
-# --- Backend assertion #3: in-app action dispatched ---
+# --- Backend assertion #2: in-app action dispatched ---
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
@@ -179,6 +197,19 @@ name: E2E — Campaign 141 full loop with real push delivery
       MIN_METRIC: "sent"
       CAMPAIGN_ID: "141"
       MAX_WAIT_MS: "45000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# --- Backend assertion #3: this push reached the device ---
+# Keep this after the in-app assertion so `output.message_id` remains the push
+# delivery id until the opened check below.
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "delivered"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
 # --- Dismiss any modal Campaign 141 raised ---
@@ -206,6 +237,20 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_08_inline_b
       - scroll
       - takeScreenshot: artifacts/c141_09_inline_c
+
+# Leave the app on a known screen before opening the system notification surface.
+# This makes the post-tap dashboard assertion prove app re-entry rather than depend
+# on whichever optional campaign screen happened to be visible.
+- runFlow:
+    when:
+      notVisible:
+        id: "custom_event_button"
+    commands:
+      - tapOn: "Back Button"
+- extendedWaitUntil:
+    visible:
+      id: "custom_event_button"
+    timeout: 10000
 
 # --- Visual proof: notification shade / Notification Center ---
 - waitForAnimationToEnd:
@@ -237,6 +282,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       EXPECTED_TYPE: "push"
       MIN_METRIC: "opened"
       CAMPAIGN_ID: "141"
+      EXPECTED_MESSAGE_ID: ${output.message_id}
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
