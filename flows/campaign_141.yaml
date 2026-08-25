@@ -262,24 +262,9 @@ name: E2E — Campaign 141 full loop with real push delivery
       id: "custom_event_button"
     timeout: 10000
 
-# --- Visual proof: notification shade / Notification Center ---
-- waitForAnimationToEnd:
-    timeout: 3000
-- swipe:
-    start: 50%, 1%
-    end: 50%, 90%
-    duration: 900
-- waitForAnimationToEnd:
-    timeout: 2000
-- extendedWaitUntil:
-    visible: "Maestro Push"
-    timeout: 60000
-- assertVisible: "MAESTRO_PUSH_OK"
-- takeScreenshot: artifacts/c141_04_push_in_shade
-
-# --- Backend assertion #3: this visible push reported delivery ---
-# Keep this after the in-app assertion so `output.message_id` remains the push
-# delivery id until the opened check below.
+# --- Backend assertion #3: this push reached the device ---
+# Run this before opening the system surface so iOS does not capture an empty
+# Notification Center while the push is still in flight.
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
@@ -290,7 +275,56 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
 
-- tapOn: "Maestro Push"
+# The delivery metric is emitted by the notification service extension before
+# iOS necessarily finishes presenting the banner in Notification Center.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - runScript:
+          file: ../scripts/wait.js
+          env:
+            WAIT_MS: "5000"
+
+# --- Visual proof: notification shade / Notification Center ---
+- waitForAnimationToEnd:
+    timeout: 3000
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
+- waitForAnimationToEnd:
+    timeout: 2000
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Maestro Push"
+          timeout: 60000
+      - assertVisible: "MAESTRO_PUSH_OK"
+- takeScreenshot: artifacts/c141_04_push_in_shade
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Maestro Push"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      # iOS Notification Center is visible but is not exposed to
+      # Maestro's accessibility hierarchy. The exact opened-metric assertion
+      # below verifies that these system-surface coordinates selected the
+      # expected push. On the Simulator lock screen, tapping the notification
+      # reveals its Open action; the second tap activates it.
+      - tapOn:
+          point: "50%,82%"
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - tapOn:
+          point: "15%,82%"
 - waitForAnimationToEnd:
     timeout: 4000
 # Return to the known app screen for visual evidence. The exact opened metric
