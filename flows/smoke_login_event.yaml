@@ -128,6 +128,12 @@ name: Smoke — identify → custom event persisted
             - assertNotVisible: ".*Thank you for choosing.*"
       - tapOn:
           id: "event_name_input"
+      # Start every attempt from an empty field. `inputText` appends to
+      # whatever the field already holds, so a retry after a partial or
+      # already-successful entry would produce a doubled value that the exact
+      # assertion below can never match (Maestro matches `text` against the
+      # whole string, not a substring).
+      - eraseText
       - inputText: "maestro_test_event"
       # Hosted campaign delivery can lag long enough to arrive after the
       # immediate field-boundary check. Give it one bounded final window
