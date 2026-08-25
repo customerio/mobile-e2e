@@ -59,6 +59,8 @@ match the full text. Use `".*Thank you for choosing.*"` instead.
 | iOS backend push-to-start | Call `/v1/live_notifications/start`, poll status to `sent`, then match the unique run id in ActivityKit; successful delivery proves the SDK's consumed push-to-start registration reached Customer.io | Live Notifications plan, App API key, configured APNs sandbox key, supported Simulator host, and the dedicated `Live Notification Token` CDP action |
 | iOS backend update/end | Reuse the returned `instance_id`, call update/end, require each operation's status to become `sent`, then match updated/final content and state in ActivityKit | Same as above; services must put `input-push-token: 1` on the iOS start payload and the resulting SDK instance-token registration must complete |
 | Remote Live Activity system surface | Background the app after remote updates and capture the Simulator system presentation | Dynamic Island-capable Simulator model |
+| Generic push delivery | Fire Campaign 141 with an exact run-correlated event, require `metrics.delivered`, and assert the notification in the system surface | The seeded Campaign 141, valid APNs sandbox or FCM credentials, and a supported simulator, emulator, or device |
+| Generic push tap and open tracking | Tap that notification, require the sample's known dashboard, then require `metrics.opened` for the same fresh profile and campaign | Same as above, with a push deep link that returns to the sample |
 
 The remote iOS lane also validates the final outcome of device registration: a
 successful push-to-start for a fresh SDK-identified profile proves that services
@@ -74,8 +76,6 @@ ordering because APNs decides when the Simulator supplies a token.
 | **Page rule: in-app shows only on screen Y** | Navigate to screen Y → `assertVisible` on in-app body. Navigate to screen Z → `assertNotVisible`. | A campaign with a page-rule filter keyed to a screen name the sample actually emits via `CustomerIO.screen("Y")` |
 | **Frequency capping: same in-app doesn't show twice** | Trigger once, dismiss, assert visible. Trigger again, `extendedWaitUntil timeout` short, `assertNotVisible`. | A campaign with frequency cap configured |
 | **Action button on in-app fires tracking event + deep-link** | `tapOn` the action button inside the rendered in-app → `assertVisible` destination screen → `runScript` poll `/v1/messages/:id` for `metrics.clicked` or `metrics.action_taken` | Known campaign with a known action button label |
-| **Push received tracked** | After campaign fires, `openNotifications` on Android or assert the iOS system surface, then poll for `metrics.delivered` | Real device, Android emulator with Google Play Services, or a supported iOS Simulator with valid APNs sandbox configuration |
-| **Push tap → deep link** | After `openNotifications` + `tapOn`, assert the expected in-app screen is shown | Real device + a campaign with a push containing a deep link |
 | **Profile attribute update visible on server** | tap `Set Profile Attribute` → fill name/value → `runScript` poll `/v1/customers/:cio_id/attributes` | Nothing extra — sample and Ext API both support this today |
 | **Logout clears identity** | `tapOn: "Logout"` → `assertVisible: "Login"` → `runScript` confirm no new events for the cio_id | Sample must render the Logout button (Android does; iOS's current dashboard hides it) |
 | **Re-identify same email stitches history** | Log in with pre-existing email → `runScript` assert same cio_id returned from lookup → no duplicate customer | Nothing extra |

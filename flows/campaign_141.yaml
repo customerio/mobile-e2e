@@ -32,6 +32,16 @@ name: E2E — Campaign 141 full loop with real push delivery
 - launchApp:
     clearState: true
 
+# Maestro 2.6 can leave a freshly reinstalled iOS app behind SpringBoard even
+# though launchApp reports success. Bring that same process to the foreground;
+# this does not clear state again and is a no-op on Android.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - launchApp:
+          stopApp: false
+
 - runFlow:
     file: shared/android_startup_ready.yaml
     env:
@@ -94,15 +104,25 @@ name: E2E — Campaign 141 full loop with real push delivery
 - tapOn:
     id: "event_name_input"
 - inputText: "maestro_test"
-- hideKeyboard
 - tapOn:
     id: "property_name_input"
 - inputText: "run_id"
-- hideKeyboard
 - tapOn:
     id: "property_value_input"
 - inputText: ${output.run_id}
-- hideKeyboard
+# UIKit's custom-event fields need a neutral tap, while Android's Gboard needs
+# the native keyboard command before the form can scroll to its submit button.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          point: "50%,25%"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - takeScreenshot: artifacts/c141_03_event_form
 # The SDK may flush a queued in-app modal between form fill and the Send tap.
 - runFlow:
@@ -124,7 +144,33 @@ name: E2E — Campaign 141 full loop with real push delivery
 - tapOn:
     id: "send_event_button"
 
-# --- Backend assertion #1: in-app action dispatched ---
+# --- Backend assertion #1: exact trigger event reached the server ---
+- runScript:
+    file: ../scripts/assert_customer_activity.js
+    env:
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_ACTIVITY_TYPE: "event"
+      EXPECTED_ACTIVITY_NAME: "maestro_test"
+      EXPECTED_PROPERTY_NAME: "run_id"
+      EXPECTED_PROPERTY_VALUE: ${output.run_id}
+      MIN_TIMESTAMP_SECONDS: ${output.started_at_seconds}
+      MAX_WAIT_MS: "45000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# --- Backend assertion #2: push reached the device ---
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "delivered"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "60000"
+- assertTrue: ${output.assert_ok === "true"}
+
+# --- Backend assertion #3: in-app action dispatched ---
 - runScript:
     file: ../scripts/assert_message_delivered.js
     env:
@@ -162,9 +208,6 @@ name: E2E — Campaign 141 full loop with real push delivery
       - takeScreenshot: artifacts/c141_09_inline_c
 
 # --- Visual proof: notification shade / Notification Center ---
-# The push going live IS the shade showing the notification — if the
-# notification doesn't appear the shade's `runFlow: when: visible: Maestro Push`
-# short-circuits and we skip the click check (iOS case when APNs isn't wired).
 - waitForAnimationToEnd:
     timeout: 3000
 - swipe:
@@ -173,21 +216,28 @@ name: E2E — Campaign 141 full loop with real push delivery
     duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
-- runFlow:
-    when:
-      visible: "Maestro Push"
-    commands:
-      - assertVisible: "Maestro Push"
-      - assertVisible: "MAESTRO_PUSH_OK"
-      - takeScreenshot: artifacts/c141_04_push_in_shade
-      - tapOn: "Maestro Push"
-      - waitForAnimationToEnd:
-          timeout: 4000
-      # App-returned-to-known-screen is the proof the push tap opened the app.
-      - extendedWaitUntil:
-          visible:
-            id: "custom_event_button"
-          timeout: 10000
-      - takeScreenshot: artifacts/c141_05_after_push_tap
+- assertVisible: "Maestro Push"
+- assertVisible: "MAESTRO_PUSH_OK"
+- takeScreenshot: artifacts/c141_04_push_in_shade
+- tapOn: "Maestro Push"
+- waitForAnimationToEnd:
+    timeout: 4000
+# App-returned-to-known-screen is the proof the push tap opened the app.
+- extendedWaitUntil:
+    visible:
+      id: "custom_event_button"
+    timeout: 10000
+- takeScreenshot: artifacts/c141_05_after_push_tap
+
+# --- Backend assertion #4: SDK reported the tap ---
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "opened"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "45000"
+- assertTrue: ${output.assert_ok === "true"}
 
 - takeScreenshot: artifacts/c141_06_done

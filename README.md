@@ -152,8 +152,8 @@ flows/
     android_startup_ready.yaml # Android launcher-ANR recovery plus a bounded
                                # wait for the caller's STARTUP_READY_ID.
   campaign_141.yaml            # Full E2E loop: SDK identify → backend → campaign
-                               # 141 → in-app + inline + push, with visual proof
-                               # of the push notification.
+                               # 141 → delivered push → notification tap → opened,
+                               # plus the campaign's in-app and inline actions.
   smoke_login_event.yaml       # Smoke: identify → optional welcome modal →
                                # exact run-correlated custom event persisted.
   geofence_basic.yaml          # Always permission → outside location → registered
