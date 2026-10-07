@@ -570,10 +570,16 @@ cleanup_device() {
 trap cleanup_device EXIT
 
 build_and_install_android() {
-  local apk="$SDK_REPO/samples/java_layout/build/outputs/apk/debug/java_layout-debug.apk"
+  local sample="$SDK_REPO/samples/java_layout"
+  local task="assembleDebug" apk="$sample/build/outputs/apk/debug/java_layout-debug.apk"
+  # Newer SDK branches split the sample into push flavors; test the default token one.
+  if grep -q "productFlavors" "$sample/build.gradle"; then
+    task="assembleTokenDebug"
+    apk="$sample/build/outputs/apk/token/debug/java_layout-token-debug.apk"
+  fi
   if [[ "$SKIP_BUILD" == 0 ]]; then
     note "building Android SDK sample"
-    (cd "$SDK_REPO" && ./gradlew :samples:java_layout:assembleDebug) \
+    (cd "$SDK_REPO" && ./gradlew ":samples:java_layout:$task") \
       2>&1 | tee "$ARTIFACT_DIR/build.log"
   fi
   [[ -f "$apk" ]] || die "Android sample APK is missing: $apk"
