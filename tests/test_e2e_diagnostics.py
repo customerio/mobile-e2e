@@ -70,7 +70,8 @@ class AssertRecordTests(unittest.TestCase):
             sink = self.write_sink(directory, [
                 geofence_record(
                     result="match", activity_id="bbb:5", activity_timestamp=1791442727,
-                    activity_fields=["data", "id", "timestamp", "type"],
+                    activity_fields=["data", "delivery_type", "id", "timestamp", "type"],
+                    activity_delivery_type="android",
                     attempts=3, elapsed_ms=1500, activities_seen=[],
                     bounds={"max_wait_ms": 90000, "exclude_activity_ids": []},
                 ),
@@ -79,7 +80,7 @@ class AssertRecordTests(unittest.TestCase):
             (line,) = e2e_diagnostics.assert_records(sink)
 
         self.assertIn(
-            "match id=bbb:5 ts=1791442727 fields=data,id,timestamp,type "
+            "match id=bbb:5 ts=1791442727 fields=data,delivery_type,id,timestamp,type delivery_type=android "
             "(3 polls, 1500 ms; exclude=[] max_wait=90000ms)", line)
         self.assertTrue(line.endswith("seen: none"))
 

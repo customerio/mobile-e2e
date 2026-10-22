@@ -273,6 +273,7 @@
                         // Field names only: shows whether the Ext API exposes
                         // more than the documented activity fields.
                         activity_fields: Object.keys(activity).sort(),
+                        activity_delivery_type: activity.delivery_type,
                         attempts: attempts,
                         elapsed_ms: Date.now() - startedAt,
                         activities_seen: seen

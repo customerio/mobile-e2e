@@ -108,6 +108,8 @@ def format_record(record: dict) -> str:
         )
         if isinstance(record.get("activity_fields"), list):
             outcome += " fields=" + ",".join(str(name) for name in record["activity_fields"])
+        if record.get("activity_delivery_type") is not None:
+            outcome += f" delivery_type={record['activity_delivery_type']}"
     else:
         outcome = f"{result} reason={record.get('reason')}"
         if record.get("last_error"):
