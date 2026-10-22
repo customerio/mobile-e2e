@@ -452,14 +452,18 @@ name: Message Inbox — backend, startup hydration, SDK data API, visual present
     commands:
       - tapOn:
           id: "BackButton"
+# Android's bell label is host-supplied since SDK 4.25.0: the sample sets
+# "Notifications", or "Notifications, N unread" while the badge shows. Older
+# SDKs used the built-in "Notifications inbox". Text selectors must match the
+# whole label, so this matches those three forms and no inbox message row.
 - runFlow:
     when:
       platform: Android
     commands:
       - extendedWaitUntil:
-          visible: "Notifications inbox"
+          visible: "Notifications(, [0-9]+ unread| inbox)?"
           timeout: 15000
-      - tapOn: "Notifications inbox"
+      - tapOn: "Notifications(, [0-9]+ unread| inbox)?"
 - runFlow:
     when:
       platform: iOS
