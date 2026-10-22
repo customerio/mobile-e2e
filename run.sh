@@ -248,6 +248,11 @@ else
 fi
 
 # --- Run maestro.
+# The SDK stamps events with the emulator's clock while assertions run on this
+# runner; keep the offset in the job log, which outlives uploaded evidence.
+if [[ "$PLATFORM" == Android ]]; then
+  python3 "$HARNESS_DIR/scripts/e2e_diagnostics.py" android-clock "$ANDROID_DEVICE" || true
+fi
 echo ">> running maestro: $FLOW_PATH"
 MAESTRO_DEVICE_ARGS=()
 if [[ "$PLATFORM" == iOS ]]; then
@@ -306,6 +311,10 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   "$FLOW_PATH" | tee "$OUT_DIR/run.log"
 EXIT=$?
 set -e
+
+# Each activity assertion's result, bounds, and the activities the backend
+# returned, so a failure stays explainable after the artifacts expire.
+python3 "$HARNESS_DIR/scripts/e2e_diagnostics.py" assert-records "$SINK_LOG" || true
 
 # Stop live device logging before artifact sanitization. Otherwise the log can
 # grow between redaction and the verification pass, leaving the uploaded copy

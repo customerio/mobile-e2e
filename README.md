@@ -179,15 +179,16 @@ scripts/
   send_inbox_message.js        # Sends a transactional Inbox template to the
                                # SDK-identified synthetic profile.
   assert_customer_activity.js  # Polls Ext API activities for an exact event/property
-                               # or first-class geofence activity after a timestamp.
+                               # or first-class geofence activity. RECORD_BASELINE
+                               # snapshots existing ids so a later poll can require
+                               # a new activity without comparing device and runner
+                               # clocks.
   capture_live_activity_id.js  # Extracts the SDK-minted id from the app's
                                # ActivityKit probe using Maestro copied text.
   assert_live_notification_status.js
                                # Polls the correlated Live Notifications status
                                # and checks state, operation, source, and delivery.
   live_notification_request.js # Calls start/update/end and polls delivery status.
-  mark_time.js                 # Marks the movement boundary so older activities do
-                               # not create false positives.
   wait.js                      # Bounded wait for async SDK/backend transitions.
   render_report.py             # Reads Maestro debug-output + sink.jsonl → tickmarks.html
                                # (per-step pass/fail, inline screenshots, real Ext API
