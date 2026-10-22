@@ -160,7 +160,16 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       id: "live_activity_system_status"
       text: "(?s).*segments state=active status=Order placed.*"
     timeout: 15000
-- pressKey: Lock
+# Reach the system Lock Screen presentation by pulling down the cover sheet
+# from the top-left edge, the same Notification Center gesture used by
+# campaign_141.yaml (the top-right edge opens Control Center instead). It shows
+# the same system-owned Live Activity card and consent as the hardware Lock
+# button, but no button event exists that iOS can read as a long press and
+# answer with Siri over the Lock Screen.
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - tapOn:
@@ -177,6 +186,10 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       WAIT_MS: "3000"
 - tapOn:
     point: "71%,80%"
+# The app stays in the foreground beneath the cover sheet, so Maestro keeps
+# reading the app's hierarchy and "Live Activities" is visible before the sheet
+# is gone. launchApp without stopping asks SpringBoard to foreground the same
+# app process, which dismisses the cover sheet when the swipe did not.
 - swipe:
     start: "50%,92%"
     end: "50%,20%"
@@ -321,8 +334,12 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
       - assertTrue: ${output.live_status_ok === "true"}
 
 # Capture the full system-owned Lock Screen card while the original screen still
-# owns the local handle needed for the subsequent SDK end operation.
-- pressKey: Lock
+# owns the local handle needed for the subsequent SDK end operation. Pull down
+# the cover sheet as in the warm-up; never press the hardware Lock button.
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - extendedWaitUntil:
@@ -350,10 +367,14 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     visible: ".*Preparing your order.*"
     timeout: 15000
 - takeScreenshot: artifacts/live_activities_03_local_system_surface
+# Same deterministic return as the warm-up. launchApp without stopping keeps
+# this screen and its local Live Activity handle.
 - swipe:
     start: "50%,92%"
     end: "50%,20%"
     duration: 600
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible: "Live Activities"
     timeout: 30000
@@ -422,7 +443,10 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
 # The ended card remains on the Lock Screen by design. Capture its final
 # rendered state, then dismiss it before starting another template so iOS does
 # not keep the old card foregrounded over the next active one.
-- pressKey: Lock
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - extendedWaitUntil:
@@ -518,7 +542,12 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     visible:
       id: "custom_event_button"
     timeout: 15000
-- pressKey: Lock
+# Tapping the card opens the app through its widget URL, which also dismisses
+# the cover sheet; no launchApp here so only the deep link can route back.
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - takeScreenshot: artifacts/live_activities_08_deep_link_system_surface

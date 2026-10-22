@@ -70,9 +70,14 @@ appId: ${APP_ID}
 - assertTrue: ${output.live_instance_id === output.visual_start_instance_id}
 - takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_02_update
 
-# `pressKey: Lock` exposes the full system-owned Lock Screen presentation while
-# the original screen retains the local handle needed for the end operation.
-- pressKey: Lock
+# Pulling down the cover sheet exposes the full system-owned Lock Screen
+# presentation while the original screen retains the local handle needed for
+# the end operation. The parent flow's warm-up explains why this never presses
+# the hardware Lock button.
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - extendedWaitUntil:
@@ -100,10 +105,15 @@ appId: ${APP_ID}
     visible: ".*${LIVE_ACTIVITY_LOCK_SCREEN_TEXT}.*"
     timeout: 15000
 - takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_03_lock_screen
+# Maestro reads the app's hierarchy beneath the cover sheet, so launchApp
+# without stopping makes SpringBoard dismiss the sheet if the swipe did not,
+# while keeping this screen and its local handle.
 - swipe:
     start: "50%,92%"
     end: "50%,20%"
     duration: 600
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible: "Live Activities"
     timeout: 30000
@@ -145,7 +155,10 @@ appId: ${APP_ID}
 # Prove the system kept the final state after ActivityKit ended the activity.
 # Dismiss the ended card before the parent starts another template; otherwise
 # iOS can foreground the old card over the next active one.
-- pressKey: Lock
+- swipe:
+    start: 20%, 1%
+    end: 20%, 90%
+    duration: 900
 - waitForAnimationToEnd:
     timeout: 2000
 - extendedWaitUntil:
