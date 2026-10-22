@@ -270,6 +270,9 @@
                         activity_name: activity.name,
                         activity_timestamp: activity.timestamp,
                         activity_data: activity.data || {},
+                        // Field names only: shows whether the Ext API exposes
+                        // more than the documented activity fields.
+                        activity_fields: Object.keys(activity).sort(),
                         attempts: attempts,
                         elapsed_ms: Date.now() - startedAt,
                         activities_seen: seen

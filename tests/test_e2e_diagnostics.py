@@ -70,6 +70,7 @@ class AssertRecordTests(unittest.TestCase):
             sink = self.write_sink(directory, [
                 geofence_record(
                     result="match", activity_id="bbb:5", activity_timestamp=1791442727,
+                    activity_fields=["data", "id", "timestamp", "type"],
                     attempts=3, elapsed_ms=1500, activities_seen=[],
                     bounds={"max_wait_ms": 90000, "exclude_activity_ids": []},
                 ),
@@ -77,7 +78,9 @@ class AssertRecordTests(unittest.TestCase):
 
             (line,) = e2e_diagnostics.assert_records(sink)
 
-        self.assertIn("match id=bbb:5 ts=1791442727 (3 polls, 1500 ms; exclude=[] max_wait=90000ms)", line)
+        self.assertIn(
+            "match id=bbb:5 ts=1791442727 fields=data,id,timestamp,type "
+            "(3 polls, 1500 ms; exclude=[] max_wait=90000ms)", line)
         self.assertTrue(line.endswith("seen: none"))
 
     def test_long_seen_lists_are_truncated(self):

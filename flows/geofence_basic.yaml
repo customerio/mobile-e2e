@@ -184,7 +184,10 @@ name: Geofence — outside → inside → backend transition
 
 # --- Hard backend assertion: exact geofence persisted for this run's customer ---
 # Backend ingestion promotes the SDK's `Geofence Transition` track payload to
-# the first-class `geofence` activity model, whose ids use snake_case.
+# the first-class `geofence` activity model, whose ids use snake_case. That
+# model carries no enter/exit field. It does not need one here: fences register
+# with an initial ENTER trigger only, and between the baseline and this assert
+# the device only moves into the fence, so a new activity for it is its ENTER.
 - runScript:
     file: ../scripts/assert_customer_activity.js
     env:

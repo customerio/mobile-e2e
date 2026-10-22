@@ -106,6 +106,8 @@ def format_record(record: dict) -> str:
         outcome = (
             f"match id={record.get('activity_id')} ts={record.get('activity_timestamp')}"
         )
+        if isinstance(record.get("activity_fields"), list):
+            outcome += " fields=" + ",".join(str(name) for name in record["activity_fields"])
     else:
         outcome = f"{result} reason={record.get('reason')}"
         if record.get("last_error"):

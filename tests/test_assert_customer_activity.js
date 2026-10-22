@@ -194,6 +194,7 @@ test("baseline empty + new fence-83 enter -> pass", () => {
     const record = maestro.sinkEvents[maestro.sinkEvents.length - 1]
     assert.strictEqual(record.result, "match")
     assert.deepStrictEqual(record.bounds.exclude_activity_ids, [])
+    assert.deepStrictEqual(record.activity_fields, ["data", "id", "timestamp", "type"])
     assert.ok(record.activities_seen.some(seen => seen.id === FENCE_83_ENTER.id))
 })
 
