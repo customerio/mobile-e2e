@@ -52,8 +52,20 @@
     output.assert_ok = "false"
     output.assert_reason = ""
 
-    function parse(res) {
-        try { return JSON.parse(res.body) } catch (_) { return {} }
+    // The array at `field` of a JSON object body, or null when the body does
+    // not parse or `field` is not an array of objects. Callers treat null as
+    // an unreadable response, never as an empty list: an empty baseline would
+    // let an activity that already existed count as new later.
+    function readList(res, field) {
+        var body
+        try { body = JSON.parse(res.body) } catch (_) { return null }
+        if (body === null || typeof body !== "object") return null
+        var list = body[field]
+        if (!Array.isArray(list)) return null
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === null || typeof list[i] !== "object") return null
+        }
+        return list
     }
 
     function busyWait(ms) {
@@ -128,8 +140,9 @@
         } catch (_) { /* sink is diagnostic only */ }
     }
 
-    // One customer lookup + one activities read. Returns
-    // { cioId, activities } on success or { cioId, reason } on failure.
+    // One customer lookup + one activities read. Returns { activities } on
+    // success or { reason } on failure; polling counts a failure as that
+    // attempt's miss, the baseline fails with it.
     var cioId = null
     function fetchActivities() {
         if (!cioId) {
@@ -137,7 +150,8 @@
                 BASE + "/customers?email=" + encodeURIComponent(RUN_EMAIL),
                 { headers: AUTH })
             if (lookup.status === 200) {
-                var customers = (parse(lookup).results || [])
+                var customers = readList(lookup, "results")
+                if (customers === null) return { reason: "customer_lookup_unreadable" }
                 if (customers.length > 0 && customers[0].cio_id) cioId = customers[0].cio_id
             } else if (lookup.status !== 404) {
                 return { reason: "customer_lookup_status_" + lookup.status }
@@ -149,7 +163,9 @@
         if (NAME) path += "&name=" + encodeURIComponent(NAME)
         var res = http.get(path, { headers: AUTH })
         if (res.status !== 200) return { reason: "activities_status_" + res.status }
-        return { activities: parse(res).activities || [] }
+        var activities = readList(res, "activities")
+        if (activities === null) return { reason: "activities_unreadable" }
+        return { activities: activities }
     }
 
     // Type, name and property filters. Timestamp and baseline are separate so
@@ -276,6 +292,7 @@
                         activity_delivery_type: activity.delivery_type,
                         attempts: attempts,
                         elapsed_ms: Date.now() - startedAt,
+                        last_error: lastReason || undefined,
                         activities_seen: seen
                     })
                     return

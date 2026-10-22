@@ -38,11 +38,12 @@ const FENCE_83_ENTER = geofence("d0083000-0000-4000-8000-000000000083:5", 83, 17
 const RUNNER_MS_AT_CROSSING = 1791442729400
 
 // backend(url) -> { status, body } for Ext API reads.
-function fakeBackend(activitiesFor) {
+function fakeBackend(activitiesFor, lookupFor) {
     const calls = { lookups: 0, activities: 0 }
     function get(url) {
         if (url.startsWith(BASE + "/customers?email=")) {
             calls.lookups++
+            if (lookupFor) return lookupFor(calls.lookups)
             return { status: 200, body: JSON.stringify({ results: [{ cio_id: CIO_ID }] }) }
         }
         if (url.startsWith(BASE + "/customers/" + CIO_ID + "/activities?")) {
@@ -251,6 +252,49 @@ test("baseline snapshot fails closed on a backend error", () => {
     assert.strictEqual(maestro.output.baseline_activity_ids, "")
     assert.strictEqual(maestro.output.assert_reason, "baseline_activities_status_503")
     assert.strictEqual(backend.calls.activities, 1)
+})
+
+test("malformed baseline body fails the baseline by name", () => {
+    const backend = fakeBackend(() => ({ status: 200, body: "<html>upstream error</html>" }))
+    const maestro = makeMaestro(backend, RUNNER_MS_AT_CROSSING)
+    runScriptFile(maestro, SCRIPT, geofenceAssertEnv({ RECORD_BASELINE: "true" }))
+    assert.strictEqual(maestro.output.baseline_ok, "false")
+    assert.strictEqual(maestro.output.baseline_activity_ids, "")
+    assert.strictEqual(maestro.output.assert_reason, "baseline_activities_unreadable")
+    assert.strictEqual(backend.calls.activities, 1)
+})
+
+test("baseline response without an activities array fails the baseline by name", () => {
+    for (const body of ["{}", JSON.stringify({ activities: null }), JSON.stringify({ activities: [null] })]) {
+        const backend = fakeBackend(() => ({ status: 200, body }))
+        const maestro = makeMaestro(backend, RUNNER_MS_AT_CROSSING)
+        runScriptFile(maestro, SCRIPT, geofenceAssertEnv({ RECORD_BASELINE: "true" }))
+        assert.strictEqual(maestro.output.baseline_ok, "false", "body " + body)
+        assert.strictEqual(maestro.output.assert_reason, "baseline_activities_unreadable", "body " + body)
+    }
+})
+
+test("unreadable poll counts as a miss, then a valid poll matches", () => {
+    const backend = fakeBackend(call => (call === 1
+        ? { status: 200, body: "{\"activities\": " }
+        : OUTSIDE_ENTERS.concat([FENCE_83_ENTER])))
+    const maestro = makeMaestro(backend, RUNNER_MS_AT_CROSSING)
+    runScriptFile(maestro, SCRIPT, geofenceAssertEnv({ EXCLUDE_ACTIVITY_IDS: "[]", MAX_WAIT_MS: "90000" }))
+    assert.strictEqual(maestro.output.assert_ok, "true")
+    assert.strictEqual(maestro.output.assert_reason, "matched_after_2_attempts")
+    const record = maestro.sinkEvents[maestro.sinkEvents.length - 1]
+    assert.strictEqual(record.last_error, "activities_unreadable")
+})
+
+test("unreadable customer lookup is recorded and never resolves a customer", () => {
+    const backend = fakeBackend(() => OUTSIDE_ENTERS.concat([FENCE_83_ENTER]),
+        () => ({ status: 200, body: JSON.stringify({ results: "nope" }) }))
+    const maestro = makeMaestro(backend, RUNNER_MS_AT_CROSSING)
+    runScriptFile(maestro, SCRIPT, geofenceAssertEnv({ EXCLUDE_ACTIVITY_IDS: "[]", MAX_WAIT_MS: "3000" }))
+    assert.strictEqual(maestro.output.assert_ok, "false")
+    assert.match(maestro.output.assert_reason, /^customer_not_resolved_after_\d+$/)
+    assert.strictEqual(maestro.output.last_error, "customer_lookup_unreadable")
+    assert.strictEqual(backend.calls.activities, 0)
 })
 
 test("unreadable exclusion list fails without polling", () => {
