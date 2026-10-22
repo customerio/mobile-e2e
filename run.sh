@@ -228,8 +228,9 @@ if [[ "$PLATFORM" == Android ]]; then
   }
   record_android_segments &
   REC_PID=$!
+  # "[CIO]" is the Android SDK's logcat tag for every module, geofence included.
   adb -s "$ANDROID_DEVICE" logcat -v threadtime \
-    'CustomerIO:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
+    'CustomerIO:V' '[CIO]:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
     >"$OUT_DIR/device-live.log" 2>&1 &
   DEVICE_LOG_PID=$!
 else
