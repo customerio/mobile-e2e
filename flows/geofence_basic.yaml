@@ -156,8 +156,23 @@ name: Geofence — outside → inside → backend transition
             WAIT_MS: "20000"
 
 # --- Cross into the seeded fence ---
+# The SDK stamps the transition with the device's clock, which can trail the
+# runner by a second or more, so a runner-side "after" timestamp can reject the
+# real transition. Instead, record which matching activities the backend
+# already has (expected none: a fresh customer, ~1.85 km from the fence) and
+# require a new one after the move.
 - runScript:
-    file: ../scripts/mark_time.js
+    file: ../scripts/assert_customer_activity.js
+    env:
+      MAESTRO_EXT_API_BASE_URL: ${MAESTRO_EXT_API_BASE_URL}
+      E2E_SINK_BASE_URL: ${E2E_SINK_BASE_URL}
+      RUN_EMAIL: ${output.email}
+      EXPECTED_ACTIVITY_TYPE: "geofence"
+      EXPECTED_ACTIVITY_NAME: ""
+      EXPECTED_PROPERTY_NAME: ${GEOFENCE_EXPECTED_PROPERTY}
+      EXPECTED_PROPERTY_VALUE: ${GEOFENCE_ID}
+      RECORD_BASELINE: "true"
+- assertTrue: ${output.baseline_ok === "true"}
 - setLocation:
     latitude: ${GEOFENCE_INSIDE_LATITUDE}
     longitude: ${GEOFENCE_INSIDE_LONGITUDE}
@@ -169,7 +184,10 @@ name: Geofence — outside → inside → backend transition
 
 # --- Hard backend assertion: exact geofence persisted for this run's customer ---
 # Backend ingestion promotes the SDK's `Geofence Transition` track payload to
-# the first-class `geofence` activity model, whose ids use snake_case.
+# the first-class `geofence` activity model, whose ids use snake_case. That
+# model carries no enter/exit field. It does not need one here: fences register
+# with an initial ENTER trigger only, and between the baseline and this assert
+# the device only moves into the fence, so a new activity for it is its ENTER.
 - runScript:
     file: ../scripts/assert_customer_activity.js
     env:
@@ -180,7 +198,7 @@ name: Geofence — outside → inside → backend transition
       EXPECTED_ACTIVITY_NAME: ""
       EXPECTED_PROPERTY_NAME: ${GEOFENCE_EXPECTED_PROPERTY}
       EXPECTED_PROPERTY_VALUE: ${GEOFENCE_ID}
-      MIN_TIMESTAMP_SECONDS: ${output.action_started_at_seconds}
+      EXCLUDE_ACTIVITY_IDS: ${output.baseline_activity_ids}
       MAX_WAIT_MS: "90000"
 - assertTrue: ${output.assert_ok === "true"}
 

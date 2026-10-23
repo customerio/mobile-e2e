@@ -200,8 +200,16 @@ android_retry_command() {
 }
 printf '%s\n' 'first Android live diagnostics' \
   >"$TRANSPORT_ARTIFACTS/device-live.log"
+# A recovered retry goes green, so the drop must be announced on the run page.
+RECOVERY_OUTPUT="$TEST_DIR/recovery-output.log"
+GITHUB_STEP_SUMMARY="$TEST_DIR/step-summary.md"
+SUITE="message-inbox"
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
+grep -Eq '^::warning::Android device went offline .* suite message-inbox;' \
+  "$RECOVERY_OUTPUT"
+[[ "$(grep -c 'message-inbox' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
 [[ -f "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/debug/maestro.log" ]]
 grep -Fq 'first Android attempt' \
@@ -221,11 +229,19 @@ printf '%s\n' \
   '16:39:01.679 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandFinished: Launch app "app" FAILED' \
   >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
 : >"$TRANSPORT_ARTIFACTS/run.log"
+# Local runs have no step summary or SUITE; the warning falls back to the flow
+# directory name and nothing else is written.
+unset GITHUB_STEP_SUMMARY SUITE
 set +e
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
+grep -Eq '^::warning::Android device went offline .* suite transport;' \
+  "$RECOVERY_OUTPUT"
+[[ "$(grep -c 'suite' "$TEST_DIR/step-summary.md")" -eq 1 ]]
+GITHUB_STEP_SUMMARY="$TEST_DIR/step-summary.md"
 [[ "$android_recovery_result" -eq 9 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
 grep -Fq 'retry also failed with exit 9' "$TRANSPORT_ARTIFACTS/run.log"
@@ -245,11 +261,18 @@ printf '%s\n' \
   >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
 set +e
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+# Failures outside the recovery path stay unannounced.
+if grep -Fq '::warning::' "$RECOVERY_OUTPUT"; then
+  echo "expected no recovery warning when the retry path is not taken" >&2
+  exit 1
+fi
+[[ "$(grep -c 'suite' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 
 # A side-effect-capable command before launch makes full-flow replay unsafe.
 printf '%s\n' \
@@ -260,11 +283,18 @@ printf '%s\n' \
   >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
 set +e
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+# Failures outside the recovery path stay unannounced.
+if grep -Fq '::warning::' "$RECOVERY_OUTPUT"; then
+  echo "expected no recovery warning when the retry path is not taken" >&2
+  exit 1
+fi
+[[ "$(grep -c 'suite' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 
 # A transport failure on any later launch must not replay a flow whose earlier
 # launch may already have produced SDK and backend side effects.
@@ -277,11 +307,18 @@ printf '%s\n' \
   >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
 set +e
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+# Failures outside the recovery path stay unannounced.
+if grep -Fq '::warning::' "$RECOVERY_OUTPUT"; then
+  echo "expected no recovery warning when the retry path is not taken" >&2
+  exit 1
+fi
+[[ "$(grep -c 'suite' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 
 # A device that never reconnects returns the original Maestro result and does
 # not invoke the retry command.
@@ -293,13 +330,19 @@ printf '%s\n' \
 ADB_STATE="offline"
 ADB_BOOTED="0"
 ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS=1
+SUITE="geofence"
 set +e
 run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
 unset ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+# The drop is still announced when the device never comes back.
+grep -Eq '^::warning::Android device went offline .* suite geofence;' \
+  "$RECOVERY_OUTPUT"
+[[ "$(grep -c 'suite geofence' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 
 echo "Android device fallback tests passed"

@@ -679,8 +679,10 @@ prepare_live_notification_permissions() {
 
 collect_device_logs() {
   if [[ "$PLATFORM" == "android" ]]; then
+    # The Android SDK logs every module, geofence included, under the logcat
+    # tag "[CIO]" (core LoggerImpl.TAG).
     adb -s "$ANDROID_SERIAL" logcat -d \
-      'CustomerIO:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
+      'CustomerIO:V' '[CIO]:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
       >"$ARTIFACT_DIR/device.log" 2>&1 || true
   else
     xcrun simctl spawn "$DEVICE_ID" log show --last 20m --style compact \

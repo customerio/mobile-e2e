@@ -72,5 +72,24 @@ class RenderReportArtifactDiscoveryTests(unittest.TestCase):
             self.assertNotIn("Screen at failure", html)
 
 
+class RenderReportScriptEnrichmentTests(unittest.TestCase):
+    def test_activity_baseline_snapshot_is_not_rendered_as_an_assertion(self):
+        geofence_env = {
+            "EXPECTED_ACTIVITY_TYPE": "geofence",
+            "EXPECTED_PROPERTY_NAME": "geofence_id",
+            "EXPECTED_PROPERTY_VALUE": "83",
+        }
+        commands = [
+            {"command": {"runScriptCommand": {"env": dict(geofence_env, RECORD_BASELINE="true")}}},
+            {"command": {"runScriptCommand": {"env": dict(geofence_env, EXCLUDE_ACTIVITY_IDS="[]")}}},
+        ]
+
+        enrichment = render_report.load_script_enrichment(commands, Path("."))
+
+        self.assertNotIn(0, enrichment)
+        self.assertEqual(enrichment[1]["type"], "geofence")
+        self.assertEqual(enrichment[1]["property_value"], "83")
+
+
 if __name__ == "__main__":
     unittest.main()

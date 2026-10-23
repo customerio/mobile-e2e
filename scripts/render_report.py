@@ -158,6 +158,11 @@ def load_script_enrichment(commands: list, debug_dir: Path) -> dict[int, dict]:
                 "max_wait_ms": env.get("MAX_WAIT_MS"),
             }
         elif "EXPECTED_ACTIVITY_TYPE" in env:
+            # A baseline snapshot asserts nothing about the backend response;
+            # the job log carries its ids. Without this, the step would borrow
+            # the next assertion's sink record.
+            if env.get("RECORD_BASELINE") == "true":
+                continue
             out[i] = {
                 "kind": "activity",
                 "type": env.get("EXPECTED_ACTIVITY_TYPE"),

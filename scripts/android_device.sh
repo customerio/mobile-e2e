@@ -188,6 +188,19 @@ preserve_android_transport_failure() {
   done
 }
 
+# A recovered retry turns the job green, so surface the device drop on the run
+# page as well as in the evidence bundle. The step summary only exists on GitHub
+# Actions; local runs just print the warning line.
+report_android_transport_recovery() {
+  local suite="$1"
+  printf '::warning::Android device went offline at the first app launch in suite %s; waiting for ADB to reconnect and retrying once. The first attempt is kept in device-recovery-attempt-1/.\n' \
+    "$suite"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf -- '- Android suite %s: device went offline at the first app launch, triggering the one-time reconnect and retry. The first attempt is kept in device-recovery-attempt-1/.\n' \
+      "$suite" >>"$GITHUB_STEP_SUMMARY"
+  fi
+}
+
 run_android_transport_recovery_once() {
   local initial_result="$1"
   local artifact_dir="$2"
@@ -199,6 +212,7 @@ run_android_transport_recovery_once() {
   [[ "$initial_result" -ne 0 ]] || return 0
   android_maestro_transport_failed_at_launch "$artifact_dir" || return "$initial_result"
   note "Android device went offline during the first app launch; waiting for ADB and retrying once"
+  report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
   if ! wait_for_android_device_reconnect "$device_id"; then
     note "Android device did not reconnect; preserving the original Maestro failure"
