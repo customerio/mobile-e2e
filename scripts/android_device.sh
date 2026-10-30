@@ -198,6 +198,65 @@ wait_for_android_device_reconnect() {
   return 1
 }
 
+# Record what ADB and the device report at the moment of failure, before any
+# recovery action changes it. The failed runs carry almost no device log
+# (logcat dies with the transport), so uptime is the one reading that tells a
+# system restart apart from a transport-only drop. Every query here fails fast
+# on an offline device, and none of them can fail the recovery.
+capture_android_transport_diagnostics() {
+  local artifact_dir="$1"
+  local device_id="$2"
+  local label="${3:-at failure}"
+  local out="$artifact_dir/device-recovery-attempt-1/adb-state.txt"
+  mkdir -p "$artifact_dir/device-recovery-attempt-1"
+  {
+    printf '== %s (%s)\n' "$label" "$(date -u +%H:%M:%S)"
+    printf -- '-- adb devices -l\n'
+    adb devices -l 2>&1 || true
+    printf -- '-- get-state\n'
+    adb -s "$device_id" get-state 2>&1 || true
+    printf -- '-- sys.boot_completed\n'
+    adb -s "$device_id" shell getprop sys.boot_completed 2>&1 || true
+    printf -- '-- /proc/uptime\n'
+    adb -s "$device_id" shell cat /proc/uptime 2>&1 || true
+    printf -- '-- logcat crash buffer\n'
+    adb -s "$device_id" logcat -d -b crash -t 80 2>&1 || true
+  } >>"$out" 2>&1
+}
+
+# The first attempt's Maestro driver died on an emulator that was still running,
+# and the retry on that same device failed identically (the driver connection
+# died about 3.7 s after connecting, both times, in a rehearsal). Reboot the
+# device so the retry starts from a fresh system server and adbd. The app's data
+# and permission grants live in the AVD's userdata and survive the reboot.
+restart_android_device_for_retry() {
+  local device_id="$1"
+  local timeout_seconds="${ANDROID_DEVICE_RESTART_TIMEOUT_SECONDS:-180}"
+  local down_deadline state booted
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || return 2
+  adb -s "$device_id" reboot >/dev/null 2>&1 || return 1
+  # Until the device has been seen going down, "device" and boot_completed=1
+  # still describe the old boot, so they cannot count as the new one.
+  down_deadline=$((SECONDS + ${ANDROID_DEVICE_DOWN_TIMEOUT_SECONDS:-30}))
+  while true; do
+    state=$(adb -s "$device_id" get-state 2>/dev/null || true)
+    booted=$(adb -s "$device_id" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+    [[ "$state" != "device" || "$booted" != "1" ]] && break
+    (( SECONDS < down_deadline )) || return 1
+    sleep 1
+  done
+  ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS="$timeout_seconds" \
+    wait_for_android_device_reconnect "$device_id" || return 1
+  # boot_completed precedes the package manager on a fresh boot, and Maestro's
+  # first command installs and starts its driver through it.
+  local package_deadline=$((SECONDS + 60))
+  until adb -s "$device_id" shell pm path android 2>/dev/null | grep -q '^package:'; do
+    (( SECONDS < package_deadline )) || return 1
+    sleep 1
+  done
+  adb -s "$device_id" shell input keyevent 82 >/dev/null 2>&1 || true
+}
+
 preserve_android_transport_failure() {
   local artifact_dir="$1"
   local retry_dir="$artifact_dir/device-recovery-attempt-1"
@@ -219,10 +278,10 @@ preserve_android_transport_failure() {
 # Actions; local runs just print the warning line.
 report_android_transport_recovery() {
   local suite="$1"
-  printf '::warning::Android device went offline before the SDK identified a user in suite %s; waiting for ADB to reconnect and retrying once. The first attempt is kept in device-recovery-attempt-1/.\n' \
+  printf '::warning::Android device went offline before the SDK identified a user in suite %s; rebooting it and retrying once. The first attempt is kept in device-recovery-attempt-1/.\n' \
     "$suite"
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf -- '- Android suite %s: device went offline before the SDK identified a user, triggering the one-time reconnect and retry. The first attempt is kept in device-recovery-attempt-1/.\n' \
+    printf -- '- Android suite %s: device went offline before the SDK identified a user, triggering the one-time reboot and retry. The first attempt is kept in device-recovery-attempt-1/.\n' \
       "$suite" >>"$GITHUB_STEP_SUMMARY"
   fi
 }
@@ -239,13 +298,20 @@ run_android_transport_recovery_once() {
   android_maestro_transport_failed_at_launch "$artifact_dir" ||
     android_maestro_transport_failed_before_identify "$artifact_dir" ||
     return "$initial_result"
-  note "Android device went offline before the SDK identified a user; waiting for ADB and retrying once"
+  note "Android device went offline before the SDK identified a user; rebooting it and retrying once"
   report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
+  capture_android_transport_diagnostics "$artifact_dir" "$device_id" "at failure"
   if ! wait_for_android_device_reconnect "$device_id"; then
     note "Android device did not reconnect; preserving the original Maestro failure"
     return "$initial_result"
   fi
+  if ! restart_android_device_for_retry "$device_id"; then
+    note "Android device did not come back from a restart; preserving the original Maestro failure"
+    capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after failed restart"
+    return "$initial_result"
+  fi
+  capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after restart"
   local retry_result
   export E2E_RECOVERY_ATTEMPT=1
   "$@"
