@@ -154,6 +154,32 @@ android_maestro_transport_failed_at_launch() {
   ' "$maestro_log"
 }
 
+# Detect the same transport drop (ADB offline or the Maestro driver dying) when it
+# lands after the first launch but before the SDK identified this run's customer,
+# for example while the login form is being filled in. Nothing customer-facing
+# has happened yet, so replaying the flow is as safe as replaying a failed
+# launch: setup_run.js mints a fresh customer and the app is still logged out.
+# Once the run's email appears in the live SDK log the app is logged in, the
+# retry would start from the wrong screen, so that case keeps its original
+# failure. Any script other than setup_run.js and wait.js may have mutated the
+# backend, so it also blocks the retry.
+android_maestro_transport_failed_before_identify() {
+  local artifact_dir="$1"
+  local maestro_log="$artifact_dir/debug/maestro.log"
+  local sink_log="$artifact_dir/sink.jsonl"
+  local live_log="$artifact_dir/device-live.log"
+  local email
+  [[ -f "$maestro_log" && -f "$sink_log" && -f "$live_log" ]] || return 1
+  grep -E -q 'device offline|DeviceServerDiedException' "$maestro_log" || return 1
+  email=$(grep -o '"email": "[^"]*"' "$sink_log" | tail -n 1 | cut -d'"' -f4)
+  [[ -n "$email" ]] || return 1
+  ! grep -F -q "$email" "$live_log" || return 1
+  awk '
+    /onCommandStart: Run .*\.js/ && $0 !~ /(setup_run|wait)\.js/ { unsafe = 1 }
+    END { exit unsafe }
+  ' "$maestro_log"
+}
+
 wait_for_android_device_reconnect() {
   local device_id="$1"
   local timeout_seconds="${ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS:-60}"
@@ -193,10 +219,10 @@ preserve_android_transport_failure() {
 # Actions; local runs just print the warning line.
 report_android_transport_recovery() {
   local suite="$1"
-  printf '::warning::Android device went offline at the first app launch in suite %s; waiting for ADB to reconnect and retrying once. The first attempt is kept in device-recovery-attempt-1/.\n' \
+  printf '::warning::Android device went offline before the SDK identified a user in suite %s; waiting for ADB to reconnect and retrying once. The first attempt is kept in device-recovery-attempt-1/.\n' \
     "$suite"
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    printf -- '- Android suite %s: device went offline at the first app launch, triggering the one-time reconnect and retry. The first attempt is kept in device-recovery-attempt-1/.\n' \
+    printf -- '- Android suite %s: device went offline before the SDK identified a user, triggering the one-time reconnect and retry. The first attempt is kept in device-recovery-attempt-1/.\n' \
       "$suite" >>"$GITHUB_STEP_SUMMARY"
   fi
 }
@@ -210,8 +236,10 @@ run_android_transport_recovery_once() {
   shift 3
 
   [[ "$initial_result" -ne 0 ]] || return 0
-  android_maestro_transport_failed_at_launch "$artifact_dir" || return "$initial_result"
-  note "Android device went offline during the first app launch; waiting for ADB and retrying once"
+  android_maestro_transport_failed_at_launch "$artifact_dir" ||
+    android_maestro_transport_failed_before_identify "$artifact_dir" ||
+    return "$initial_result"
+  note "Android device went offline before the SDK identified a user; waiting for ADB and retrying once"
   report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
   if ! wait_for_android_device_reconnect "$device_id"; then

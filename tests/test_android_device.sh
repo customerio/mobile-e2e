@@ -345,4 +345,81 @@ grep -Eq '^::warning::Android device went offline .* suite geofence;' \
   "$RECOVERY_OUTPUT"
 [[ "$(grep -c 'suite geofence' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
 
+# A driver or ADB drop after the first launch is retried while the SDK has not
+# yet identified this run's customer (the Maestro driver dying mid-login).
+ADB_STATE="device"
+ADB_BOOTED="1"
+SUITE="geofence"
+PRE_IDENTIFY_EMAIL="maestro+e2e-abc123@cio.test"
+write_pre_identify_fixture() {
+  printf '%s\n' \
+    '16:39:00.482 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/setup_run.js RUNNING' \
+    '16:39:01.400 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Launch app "app" RUNNING' \
+    '16:39:01.679 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandFinished: Launch app "app" COMPLETED' \
+    '16:39:05.100 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/wait.js RUNNING' \
+    '16:39:08.200 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Input text Maestro Geofence Tester RUNNING' \
+    'maestro.android.DeviceServerDiedException: Device server died during '"'"'viewHierarchy'"'"' on emulator-5554' \
+    >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
+  printf '{"kind": "setup", "run_id": "abc123", "email": "%s", "path": "/setup"}\n' \
+    "$PRE_IDENTIFY_EMAIL" >"$TRANSPORT_ARTIFACTS/sink.jsonl"
+  printf '%s\n' 'screen LoginActivity' >"$TRANSPORT_ARTIFACTS/device-live.log"
+  : >"$TRANSPORT_ARTIFACTS/run.log"
+}
+run_pre_identify_recovery() {
+  ANDROID_RETRY_CALLS=0
+  ANDROID_RETRY_RESULT=0
+  set +e
+  run_android_transport_recovery_once \
+    7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+    >"$RECOVERY_OUTPUT"
+  android_recovery_result=$?
+  set -e
+}
+
+write_pre_identify_fixture
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 0 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
+grep -Eq '^::warning::Android device went offline .* suite geofence;' \
+  "$RECOVERY_OUTPUT"
+
+# Once the run's customer shows up in the SDK log the app is logged in, so the
+# original failure stands.
+write_pre_identify_fixture
+printf '%s\n' "identify userId=$PRE_IDENTIFY_EMAIL" \
+  >>"$TRANSPORT_ARTIFACTS/device-live.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# A script other than setup_run.js and wait.js may have mutated the backend.
+write_pre_identify_fixture
+printf '%s\n' \
+  '16:39:06.000 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/send_inbox_message.js RUNNING' \
+  >>"$TRANSPORT_ARTIFACTS/debug/maestro.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# Without the run's email or the live SDK log there is no proof that nothing was
+# identified, so nothing is retried.
+write_pre_identify_fixture
+rm "$TRANSPORT_ARTIFACTS/sink.jsonl"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+write_pre_identify_fixture
+rm "$TRANSPORT_ARTIFACTS/device-live.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# A failure that is not a transport drop is never retried.
+write_pre_identify_fixture
+sed -i.bak 's/DeviceServerDiedException/AssertionError/' \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
 echo "Android device fallback tests passed"
