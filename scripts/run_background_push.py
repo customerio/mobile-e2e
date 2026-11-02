@@ -187,7 +187,7 @@ def get(api, path, reason):
 
 def lookup_customer(api, email):
     results = get(api, "/customers?email=" + quote(email, safe=""), "customer_lookup").get("results") or []
-    if len(results) != 1 or not isinstance(results[0], dict) or results[0].get("email", email) != email or not results[0].get("cio_id"):
+    if len(results) != 1 or not isinstance(results[0], dict) or results[0].get("email") != email or not results[0].get("cio_id"):
         raise RunFailure("customer_not_unique")
     return str(results[0]["cio_id"])
 
