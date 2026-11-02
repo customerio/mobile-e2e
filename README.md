@@ -368,3 +368,22 @@ correlates the SDK-minted instance with device-sourced Customer.io start/end
 deliveries, and proves real APNs sandbox delivery by matching a unique run id in
 ActivityKit after each App API operation; a backend `sent` status alone is not
 treated as device receipt.
+
+### Background push callback replay
+
+After building and installing the native Android feature sample, replay the unchanged
+Go codec fixture through the SDK's public FCM entry point:
+
+```sh
+python3 scripts/replay_background_push.py --platform android --device emulator-5580 \
+  --app-id io.customer.android.sample.java_layout \
+  --payload /absolute/path/to/services/deliveries/backgroundpush/testdata/android_fcm.json \
+  --repeat 2
+```
+
+The helper checks callback count, exact business data, and unchanged visible notification
+count. It uses the Java sample's debug receiver and JSONL callback log. It bypasses FCM
+transport and does not prove backend receipt ingestion. The iOS simulator's `simctl push`
+rejects silent-only payloads with `Notification has no user visible content`; use the timed
+APNs sandbox lane for real iOS delivery. Do not treat the visible `--suite push` control
+or this replay as silent producer-to-provider-to-device-to-ingest evidence.
