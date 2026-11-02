@@ -387,3 +387,38 @@ transport and does not prove backend receipt ingestion. The iOS simulator's `sim
 rejects silent-only payloads with `Notification has no user visible content`; use the timed
 APNs sandbox lane for real iOS delivery. Do not treat the visible `--suite push` control
 or this replay as silent producer-to-provider-to-device-to-ingest evidence.
+
+### Real background push delivery
+
+`scripts/run_background_push.py` sends one real transactional push and requires the
+same delivery ID in the native callback and the backend's Sent and Delivered metrics.
+The callback's business data must match exactly. Android also checks that no new
+notification record appeared; iOS display suppression is explicitly unverified.
+
+Use a fresh profile from the existing E2E login flow, the feature SDK build, and an
+enabled background transactional template in the chosen test environment. The runner
+checks the template's explicit mode and the device's receiver readiness before sending.
+It never edits templates and refuses customer emails outside `maestro+e2e-...@cio.test`.
+Set `MAESTRO_APP_API_KEY` through the existing ignored environment configuration.
+
+```sh
+python3 scripts/run_background_push.py \
+  --api-base "$MAESTRO_EXT_API_BASE_URL" \
+  --email "$RUN_EMAIL" --transactional-id "$SILENT_PUSH_TRANSACTIONAL_ID" \
+  --platform ios --device "$IOS_UDID" \
+  --app-id io.customer.ios-sample.apn-spm.APN-UIKit \
+  --data /absolute/path/to/this-run-background-data.json
+```
+
+The data file contains a flat string map with a unique `run_id`. For Android, select
+`--platform android`, the adb device serial, and `io.customer.android.sample.java_layout`.
+Android moves the app to the background without force-stopping it. The iOS runner
+prints `READY_FOR_PROVIDER_SEND` after preflight and waits for `SEND` on stdin.
+Background the app and coordinate the APNs sandbox credential switch at that prompt.
+Restore the credential immediately after the run finishes. `--send-now` skips the
+iOS pause and records that backgrounding was not confirmed.
+
+The final JSON distinguishes callback, provider and backend receipt evidence. Sent
+alone cannot pass. Duplicate callbacks are allowed, and an ambiguous send timeout is
+never retried automatically. The runner's unit tests use mocked API/device responses;
+only an actual successful provider run establishes end-to-end delivery.
