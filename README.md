@@ -240,6 +240,11 @@ is pointed at the shared flow:
 maestro test .maestro/harness/flows/campaign_141.yaml
 ```
 
+Run push independently with `./e2e run --platform <android|ios> --suite push`.
+This suite requires the exact trigger event, push Sent, Delivered and Opened on
+the same message ID. It dismisses any in-app overlays needed to reach the sample
+controls, but does not require in-app dispatch or inline content.
+
 `campaign_141.yaml` is an integration flow whose supported entrypoint is the
 top-level `./e2e run --platform <android|ios> --suite campaign` command. It needs
 the runner's fresh install and device/backend preflight; the raw Maestro command
@@ -321,7 +326,7 @@ run the backend job. Each matrix job provisions its own virtual device, builds
 the SDK sample from source, and uploads `artifacts/e2e/` even on failure. The
 workflow result is the aggregate gate; individual jobs retain isolated evidence.
 
-The legacy `campaign` and `inline` suites remain available locally for
+The `campaign`, `push` and `inline` suites remain available locally for
 workspaces/devices that meet their prerequisites; they are not offered as CI
 choices because the current virtual-device lane cannot prove real push delivery
 and the inline campaign is not deterministically seeded yet.
