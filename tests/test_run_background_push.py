@@ -1,9 +1,7 @@
 import io
 import json
-import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest import mock
 
 from scripts import run_background_push as rbp
 
@@ -82,25 +80,6 @@ def execute(o, api, device, stdin=""):
 
 
 class RunBackgroundPushTest(unittest.TestCase):
-    def test_ios_simulator_refuses_real_send_before_broadcast_creation(self):
-        api = BroadcastApi(devices=[dict(CAPABLE, platform="ios")])
-        output = io.StringIO()
-        with tempfile.TemporaryDirectory() as container, mock.patch.object(
-            rbp, "run", return_value=SimpleNamespace(returncode=0, stdout=container)
-        ):
-            result = rbp.execute(
-                opts(platform="ios", transactional_id=None, create_broadcast=True),
-                api,
-                rbp.IOSSimulator("simulator-udid", "sample-app"),
-                FakeClock(),
-                io.StringIO("SEND\n"),
-                output,
-            )
-        self.assertEqual(api.calls, [])
-        self.assertEqual(result["reason"], "ios_silent_push_requires_physical_device")
-        self.assertNotEqual(result["result"], "passed")
-        self.assertNotIn("READY_FOR_PROVIDER_SEND", output.getvalue())
-
     def test_refuses_a_visible_template_before_sending(self):
         api = FakeApi(mode="visible")
         result = execute(opts(), api, FakeDevice(api))

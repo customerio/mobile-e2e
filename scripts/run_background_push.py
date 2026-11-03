@@ -3,8 +3,8 @@
 
 The send uses /send/push or a freshly created, single-profile broadcast, so APNs or FCM carries the message to the
 device. A pass needs the backend sent and delivered metrics for the returned
-delivery ID plus a device callback with that ID and the exact data. Real iOS
-qualification requires a physical device; this CLI rejects simulator targets.
+delivery ID plus a device callback with that ID and the exact data. On iOS the
+script can't inspect SpringBoard, so display suppression stays unverified.
 
 MAESTRO_APP_API_KEY is read from the environment only. Errors and the result
 leave out the key, the device token and the payload. The last stdout line is
@@ -142,12 +142,25 @@ class AndroidDevice:
 
 class IOSSimulator:
     def __init__(self, udid, app_id):
-        self.udid, self.app_id = udid, app_id
+        self.udid, self.app_id, self.path = udid, app_id, None
 
     def preflight(self):
-        # The tested iOS 27 simulator discards content-available pushes before
-        # invoking the app. It cannot qualify the real silent delivery path.
-        raise RunFailure("ios_silent_push_requires_physical_device")
+        result = run(["xcrun", "simctl", "get_app_container", self.udid, self.app_id, "data"])
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RunFailure("ios_app_container_unavailable")
+        self.path = Path(result.stdout.strip()) / "Documents" / "background-push.jsonl"
+        return None  # the operator confirms backgrounding at the send gate
+
+    def callbacks(self):
+        try:
+            return parse_rows(self.path.read_text())
+        except FileNotFoundError:
+            return []
+        except OSError:
+            raise RunFailure("ios_callback_log_unreadable") from None
+
+    def notification_snapshot(self):
+        return None  # SpringBoard state is out of reach here
 
 
 def validate(opts):
@@ -435,7 +448,7 @@ def main(argv=None):
     mode.add_argument("--transactional-id", type=int)
     mode.add_argument("--create-broadcast", action="store_true", help="create a fresh background broadcast for this profile only")
     parser.add_argument("--platform", choices=("android", "ios"), required=True)
-    parser.add_argument("--device", required=True, help="adb serial; iOS simulator targets are rejected")
+    parser.add_argument("--device", required=True, help="adb serial or simulator UDID")
     parser.add_argument("--app-id", required=True)
     parser.add_argument("--data", required=True, help="flat JSON string map, inline or a file path; must include run_id")
     parser.add_argument("--send-now", action="store_true", help="iOS: skip the READY_FOR_PROVIDER_SEND confirmation")
