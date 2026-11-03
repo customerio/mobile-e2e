@@ -383,8 +383,8 @@ python3 scripts/replay_background_push.py --platform android --device emulator-5
 
 The helper checks callback count, exact business data, and unchanged visible notification
 count. It uses the Java sample's debug receiver and JSONL callback log. It bypasses FCM
-transport and does not prove backend receipt ingestion. Our iOS 27 simulator rejected a
-silent-only local payload and a real APNs background push; see the qualification note
+transport and does not prove backend receipt ingestion. Our iOS 26.5 and 27.0 simulators
+rejected real APNs background pushes; see the qualification note
 below. Do not treat the visible `--suite push` control
 or this replay as silent producer-to-provider-to-device-to-ingest evidence.
 
@@ -435,19 +435,28 @@ Both background push and PushV2 must be enabled on the test workspace.
 
 #### iOS simulator qualification
 
-During real APNs qualification on November 3, 2026, the iOS 27 simulator received
-the silent push with background push type and priority 5. SpringBoard then rejected
-it with `Content-available push notifications are only supported on-device for iOS,
-watchOS, and tvOS`. A visible APNs control arrived and displayed on the same simulator.
-This records a failure on that runtime, not a restriction covering every simulator.
+During real APNs qualification on November 3, 2026, simulators running iOS 26.5
+(23F77) and 27.0 (24A434), on Xcode 27.2, received silent pushes with background push
+type and priority 5. SpringBoard then rejected them with `Content-available push
+notifications are only supported on-device for iOS, watchOS, and tvOS`, before the app
+callback. A second real send with the 26.5 app foregrounded received the same error.
+The target token hashes matched the backend, the receiver reported readiness, and the
+in-app receipt sender used the staging API host. A visible APNs control arrived and
+displayed on 27.0. These findings cover the tested builds, not every simulator.
 Apple documents simulated background-content-fetch notifications in the
 [Xcode 11.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-11_4-release-notes)
 and remote APNs sandbox support in the
 [Xcode 14 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-14-release-notes).
 An [Apple engineer discusses silent delivery and throttling on Simulator](https://developer.apple.com/forums/thread/795163).
-The reason this runtime rejected our push remains unresolved. The runner permits
-simulator tests, but iOS qualification still requires a matching native callback and
-backend Delivered metric. Local replay and a visible control cannot establish that.
+In a separate minimal app, local `simctl` injection with the `fetch` background mode
+invoked `performFetchWithCompletionHandler` on both runtimes, rather than the remote
+notification handler. That callback carries no push payload and cannot validate the
+SDK's silent-push handler. The feature sample retains `remote-notification` mode.
+
+The runner permits simulator tests, but iOS qualification still requires a matching
+native callback and backend Delivered metric. Those have not passed on these runtimes;
+a physical-device run remains necessary in this test environment. Local background
+fetch and a visible control cannot establish silent remote delivery.
 
 The iOS sample identifies by ID at login. Set the same synthetic address as its
 `email` profile attribute using **Set Profile Attributes** before running the
