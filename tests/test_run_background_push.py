@@ -160,8 +160,6 @@ class RunBackgroundPushTest(unittest.TestCase):
         self.assertNotIn(TOKEN, json.dumps(result))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class BroadcastApi(FakeApi):
     def __init__(self, send_error=None, create_error=None, readback=None, deliveries=None, **kwargs):
@@ -279,3 +277,7 @@ class RunBackgroundBroadcastTest(unittest.TestCase):
         api=GrowingBroadcastApi()
         result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[ROW]))
         self.assertEqual(result["reason"],"broadcast_delivery_not_unique")
+
+
+if __name__ == "__main__":
+    unittest.main()

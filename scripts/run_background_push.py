@@ -216,7 +216,7 @@ def check_template(api, transactional_id):
     contents = get(api, f"/transactional/{transactional_id}/contents", "template_contents").get("contents")
     if not isinstance(contents, list) or not contents or any(
         not isinstance(content, dict) or content.get("type") != "push"
-        or content.get("push_mode") != "background" or content.get("subject") or content.get("body")
+        or content.get("push_mode") != "background" or content.get("subject") or content.get("body") or content.get("image_url")
         for content in contents
     ):
         raise RunFailure("template_not_background")
