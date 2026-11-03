@@ -390,7 +390,8 @@ or this replay as silent producer-to-provider-to-device-to-ingest evidence.
 
 ### Real background push delivery
 
-`scripts/run_background_push.py` sends one real transactional push and requires the
+`scripts/run_background_push.py` sends one real transactional push or creates a fresh
+single-profile broadcast and requires the
 same delivery ID in the native callback and the backend's Sent and Delivered metrics.
 The callback's business data must match exactly. Android also checks that no new
 notification record appeared; iOS display suppression is explicitly unverified.
@@ -398,7 +399,7 @@ notification record appeared; iOS display suppression is explicitly unverified.
 Use a fresh profile from the existing E2E login flow, the feature SDK build, and an
 enabled background transactional template in the chosen test environment. The runner
 checks the template's explicit mode and the device's receiver readiness before sending.
-It never edits templates and refuses customer emails outside `maestro+e2e-...@cio.test`.
+It never edits existing templates and refuses customer emails outside `maestro+e2e-...@cio.test`.
 Set `MAESTRO_APP_API_KEY` through the existing ignored environment configuration.
 
 ```sh
@@ -422,3 +423,14 @@ The final JSON distinguishes callback, provider and backend receipt evidence. Se
 alone cannot pass. Duplicate callbacks are allowed, and an ambiguous send timeout is
 never retried automatically. The runner's unit tests use mocked API/device responses;
 only an actual successful provider run establishes end-to-end delivery.
+
+For the broadcast path, replace `--transactional-id ...` with `--create-broadcast`
+and use `--timeout 300`. The runner creates a new background push draft with an
+exact email filter for the supplied synthetic profile, reads back its mode and
+data, and sends it once. It refuses profiles with more than one device and never
+accepts an existing broadcast ID. An ambiguous create or send is not retried.
+Both background push and PushV2 must be enabled on the test workspace.
+
+The iOS sample identifies by ID at login. Set the same synthetic address as its
+`email` profile attribute using **Set Profile Attributes** before running the
+email lookup and audience checks.

@@ -162,3 +162,120 @@ class RunBackgroundPushTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BroadcastApi(FakeApi):
+    def __init__(self, send_error=None, create_error=None, readback=None, deliveries=None, **kwargs):
+        super().__init__(metrics={"sent":1,"delivered":2}, **kwargs)
+        self.send_error = send_error
+        self.create_error = create_error
+        self.readback = readback
+        self.deliveries = deliveries if deliveries is not None else [{"id":"dlv-1","type":"push","recipient":TOKEN,"customer_identifiers":{"cio_id":"cio-1"},"metrics":{"sent":1}}]
+
+    def call(self,method,path,body=None):
+        if path == "/newsletters" and method == "POST":
+            self.calls.append((method,path,body))
+            if self.create_error:
+                raise self.create_error
+            return 200,{"newsletter":{"id":9,"send_state":"draft"}}
+        if path == "/newsletters/9/contents":
+            self.calls.append((method,path,body))
+            return 200,{"contents":self.readback if self.readback is not None else [{"type":"push","push_mode":"background","subject":"","body":"","custom_data":DATA}]}
+        if path == "/newsletters/9/send":
+            self.calls.append((method,path,body))
+            if self.send_error:
+                raise self.send_error
+            return 200,{}
+        if path.startswith("/newsletters/9/messages"):
+            self.calls.append((method,path,body))
+            return 200,{"messages":self.deliveries}
+        return super().call(method,path,body)
+
+
+class BroadcastDevice(FakeDevice):
+    def notification_snapshot(self):
+        if self.notifications is None:
+            return None
+        sent=any(method == "POST" and path.endswith("/send") for method,path,_ in self.api.calls)
+        return self.notifications[1 if sent else 0]
+
+    def callbacks(self):
+        sent=any(method == "POST" and path.endswith("/send") for method,path,_ in self.api.calls)
+        return self.rows if sent else []
+
+
+class RunBackgroundBroadcastTest(unittest.TestCase):
+    def test_creates_only_own_audience_and_checks_real_delivery_callback(self):
+        api=BroadcastApi()
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[ROW]))
+        self.assertEqual(result["result"],"passed",result)
+        self.assertEqual(result["delivery_id"],"dlv-1")
+        self.assertEqual(result["newsletter_id"],9)
+        self.assertEqual(api.posts(),[
+            ("POST","/newsletters",{"name":"Background push E2E run42abc","type":"push","push_mode":"background","custom_data":DATA,"recipients":{"and":[{"attribute":{"field":"email","operator":"eq","value":EMAIL}}]}}),
+            ("POST","/newsletters/9/send",{}),
+        ])
+        self.assertFalse(result["evidence"]["replay_or_debug_broadcast_used"])
+
+    def test_ambiguous_send_is_never_retried(self):
+        api=BroadcastApi(send_error=rbp.TransportError())
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api))
+        self.assertEqual(result["reason"],"send_outcome_ambiguous_not_retried")
+        self.assertEqual(len([c for c in api.posts() if c[1].endswith("/send")]),1)
+
+    def test_no_capable_device_cannot_create_or_send_broadcast(self):
+        api=BroadcastApi(devices=[])
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api))
+        self.assertEqual(result["reason"],"no_eligible_device")
+        self.assertEqual(api.posts(),[])
+
+    def test_multiple_deliveries_are_not_accepted_as_the_test_delivery(self):
+        row={"id":"dlv-1","type":"push","recipient":TOKEN,"customer_identifiers":{"cio_id":"cio-1"},"metrics":{"sent":1}}
+        api=BroadcastApi(deliveries=[row,dict(row,id="other")])
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[ROW]))
+        self.assertEqual(result["reason"],"broadcast_delivery_not_unique")
+
+    def test_readback_mismatch_never_sends(self):
+        background={"type":"push","push_mode":"background","subject":"","body":"","custom_data":DATA}
+        for contents in [[dict(background,push_mode="")],[dict(background,custom_data={"run_id":"wrong"})],[background,background]]:
+            with self.subTest(contents=contents):
+                api=BroadcastApi(readback=contents)
+                result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api))
+                self.assertEqual(result["result"],"failed")
+                self.assertFalse(any(path.endswith("/send") for _,path,_ in api.posts()))
+
+    def test_extra_device_is_rejected_before_creating_any_draft(self):
+        api=BroadcastApi(devices=[CAPABLE,{"id":"other","platform":"ios","attributes":{}}])
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api))
+        self.assertEqual(result["reason"],"profile_has_other_devices")
+        self.assertEqual(api.posts(),[])
+
+    def test_ambiguous_create_is_not_retried_and_never_sends(self):
+        api=BroadcastApi(create_error=rbp.TransportError())
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api))
+        self.assertEqual(result["reason"],"broadcast_create_ambiguous_not_retried")
+        self.assertEqual(len(api.posts()),1)
+
+    def test_wrong_customer_or_recipient_cannot_be_the_discovered_delivery(self):
+        for fields,reason in [({"customer_identifiers":{"cio_id":"other"}},"broadcast_wrong_customer"),({"recipient":"other"},"broadcast_recipient_mismatch")]:
+            with self.subTest(reason=reason):
+                row={"id":"dlv-1","type":"push","recipient":TOKEN,"customer_identifiers":{"cio_id":"cio-1"},"metrics":{"sent":1}}
+                api=BroadcastApi(deliveries=[dict(row,**fields)])
+                result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[ROW]))
+                self.assertEqual(result["reason"],reason)
+
+    def test_created_draft_is_not_evidence_of_a_callback_after_the_send(self):
+        api=BroadcastApi()
+        old_row=dict(ROW,received_at_ms=995_000)
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[old_row]))
+        self.assertEqual(result["reason"],"callback_before_send")
+
+    def test_later_extra_delivery_cannot_pass_after_first_delivery_was_discovered(self):
+        class GrowingBroadcastApi(BroadcastApi):
+            def call(self,method,path,body=None):
+                result=super().call(method,path,body)
+                if path.startswith("/newsletters/9/messages") and len(self.deliveries)==1:
+                    self.deliveries=self.deliveries+[dict(self.deliveries[0],id="second")]
+                return result
+        api=GrowingBroadcastApi()
+        result=execute(opts(transactional_id=None,create_broadcast=True),api,BroadcastDevice(api,rows=[ROW]))
+        self.assertEqual(result["reason"],"broadcast_delivery_not_unique")

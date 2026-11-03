@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send one background push through the public API and check the device callback.
 
-The send goes through /send/push, so APNs or FCM carries the message to the
+The send uses /send/push or a freshly created, single-profile broadcast, so APNs or FCM carries the message to the
 device. A pass needs the backend sent and delivered metrics for the returned
 delivery ID plus a device callback with that ID and the exact data. On iOS the
 script can't inspect SpringBoard, so display suppression stays unverified.
@@ -166,13 +166,18 @@ class IOSSimulator:
 def validate(opts):
     if not isinstance(opts.email, str) or not EMAIL.fullmatch(opts.email):
         raise RunFailure("email_not_fresh_synthetic")
-    if isinstance(opts.transactional_id, bool) or not isinstance(opts.transactional_id, int) or opts.transactional_id <= 0:
+    if getattr(opts, "create_broadcast", False):
+        if opts.transactional_id is not None:
+            raise RunFailure("conflicting_send_modes")
+    elif isinstance(opts.transactional_id, bool) or not isinstance(opts.transactional_id, int) or opts.transactional_id <= 0:
         raise RunFailure("invalid_transactional_id")
     data = opts.data
     if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
         raise RunFailure("data_not_flat_string_map")
     if not data.get("run_id", "").strip():
         raise RunFailure("data_missing_run_id")
+    if getattr(opts, "create_broadcast", False) and len(data["run_id"]) > 190:
+        raise RunFailure("broadcast_run_id_too_long")
 
 
 def get(api, path, reason):
@@ -192,9 +197,11 @@ def lookup_customer(api, email):
     return str(results[0]["cio_id"])
 
 
-def eligible_device(api, cio_id, platform):
+def eligible_device(api, cio_id, platform, single_device=False):
     customer = get(api, f"/customers/{quote(cio_id, safe='')}/attributes?id_type=cio_id", "customer_attributes").get("customer")
     devices = customer.get("devices") if isinstance(customer, dict) else None
+    if single_device and len(devices or []) > 1:
+        raise RunFailure("profile_has_other_devices")
     eligible = [
         d for d in devices or []
         if isinstance(d, dict) and d.get("id") and d.get("platform") == platform
@@ -234,6 +241,72 @@ def send(api, opts, token):
     return str(response["delivery_id"])
 
 
+def create_broadcast(api, opts):
+    body = {
+        "name": "Background push E2E " + opts.data["run_id"], "type": "push",
+        "push_mode": "background", "custom_data": opts.data,
+        "recipients": {"and": [{"attribute": {"field": "email", "operator": "eq", "value": opts.email}}]},
+    }
+    try:
+        status, response = api.call("POST", "/newsletters", body)
+    except TransportError:
+        raise RunFailure("broadcast_create_ambiguous_not_retried") from None
+    newsletter = response.get("newsletter") if isinstance(response, dict) else None
+    nid = newsletter.get("id") if isinstance(newsletter, dict) else None
+    if status != 200 or isinstance(nid, bool) or not isinstance(nid, int) or nid <= 0:
+        raise RunFailure(f"broadcast_create_status_{status}")
+    return nid
+
+
+def check_newsletter(api, nid, data):
+    contents = get(api, f"/newsletters/{nid}/contents", "template_contents").get("contents")
+    if not isinstance(contents, list) or len(contents) != 1:
+        raise RunFailure("template_not_background")
+    content = contents[0]
+    if not isinstance(content, dict) or content.get("type") != "push" or content.get("push_mode") != "background" or any(
+        content.get(field) for field in ("subject", "body", "image_url")
+    ) or content.get("custom_data") != data:
+        raise RunFailure("broadcast_readback_mismatch")
+
+
+def send_broadcast(api, nid):
+    try:
+        status, _ = api.call("POST", f"/newsletters/{nid}/send", {})
+    except TransportError:
+        raise RunFailure("send_outcome_ambiguous_not_retried") from None
+    if status != 200:
+        raise RunFailure(f"send_status_{status}")
+
+
+def broadcast_delivery(api, nid, cio_id, token):
+    try:
+        status, body = api.call("GET", f"/newsletters/{nid}/messages?limit=10")
+    except TransportError:
+        return None
+    if status != 200 or not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+        return None
+    rows = body["messages"]
+    if len(rows) > 1:
+        raise RunFailure("broadcast_delivery_not_unique")
+    if not rows:
+        return None
+    row = rows[0]
+    if not isinstance(row, dict) or row.get("type") != "push" or not row.get("id"):
+        raise RunFailure("delivery_not_push")
+    identifiers = row.get("customer_identifiers") or {}
+    if identifiers.get("cio_id") != cio_id:
+        raise RunFailure("broadcast_wrong_customer")
+    metrics = row.get("metrics") or {}
+    if any(metrics.get(m) for m in FAILED_METRICS):
+        raise RunFailure("backend_reported_failure")
+    # Recipient is populated by the sent event. A queued row can still be empty.
+    if not row.get("recipient") and not metrics.get("sent"):
+        return None
+    if row.get("recipient") != token:
+        raise RunFailure("broadcast_recipient_mismatch")
+    return str(row["id"])
+
+
 def message_metrics(api, path, delivery_id):
     try:
         status, body = api.call("GET", path)
@@ -249,10 +322,16 @@ def message_metrics(api, path, delivery_id):
     return None
 
 
-def await_outcome(api, device, clock, opts, cio_id, delivery_id, started_ms, before, evidence):
+def await_outcome(api, device, clock, opts, cio_id, delivery_id, started_ms, before, evidence, identity_check=None):
     deadline = clock.monotonic() + opts.timeout
     path = f"/customers/{quote(cio_id, safe='')}/messages?limit=50"
     while True:
+        identity_verified = True
+        if identity_check is not None:
+            found = identity_check()
+            identity_verified = found == delivery_id
+            if found is not None and not identity_verified:
+                raise RunFailure("broadcast_delivery_changed")
         metrics = message_metrics(api, path, delivery_id)
         if metrics is not None:
             if any(metrics.get(m) for m in FAILED_METRICS):
@@ -280,7 +359,7 @@ def await_outcome(api, device, clock, opts, cio_id, delivery_id, started_ms, bef
             evidence["android_no_added_notification_observed"] = unchanged
             if not unchanged:
                 raise RunFailure("visible_notification_posted")
-        if rows and evidence["backend_sent_metric"] and evidence["backend_delivered_metric"]:
+        if identity_verified and rows and evidence["backend_sent_metric"] and evidence["backend_delivered_metric"]:
             return
         if clock.monotonic() >= deadline:
             raise RunFailure("timed_out_waiting_for_" + ("delivered_metric" if rows else "callback"))
@@ -299,15 +378,25 @@ def execute(opts, api, device, clock=Clock, stdin=sys.stdin, stdout=sys.stdout):
         "app_backgrounded": None,
         "android_no_added_notification_observed": None,
         "ios_no_display_verified": False if opts.platform == "ios" else None,
+        "broadcast_created": False,
+        "broadcast_readback_matched": False,
+        "delivery_id_discovered": False,
     }
-    result = {"result": "failed", "reason": None, "platform": opts.platform, "run_id": None, "delivery_id": None, "evidence": evidence}
+    result = {"result": "failed", "reason": None, "platform": opts.platform, "run_id": None, "delivery_id": None, "newsletter_id": None, "evidence": evidence}
     try:
         validate(opts)
         result["run_id"] = opts.data["run_id"]
-        check_template(api, opts.transactional_id)
+        broadcast = getattr(opts, "create_broadcast", False)
+        if not broadcast:
+            check_template(api, opts.transactional_id)
         evidence["app_backgrounded"] = device.preflight()
         cio_id = lookup_customer(api, opts.email)
-        token = eligible_device(api, cio_id, opts.platform)
+        token = eligible_device(api, cio_id, opts.platform, single_device=broadcast)
+        if broadcast:
+            result["newsletter_id"] = nid = create_broadcast(api, opts)
+            evidence["broadcast_created"] = True
+            check_newsletter(api, nid, opts.data)
+            evidence["broadcast_readback_matched"] = True
         if opts.platform == "ios":
             if opts.send_now:
                 evidence["app_backgrounded"] = "operator_unconfirmed"
@@ -316,9 +405,24 @@ def execute(opts, api, device, clock=Clock, stdin=sys.stdin, stdout=sys.stdout):
                 evidence["app_backgrounded"] = "operator_confirmed"
         before = device.notification_snapshot()
         started_ms = clock.now_ms()
-        result["delivery_id"] = send(api, opts, token)
-        evidence["api_send_accepted"] = True
-        await_outcome(api, device, clock, opts, cio_id, result["delivery_id"], started_ms, before, evidence)
+        identity_check = None
+        if broadcast:
+            send_broadcast(api, nid)
+            evidence["api_send_accepted"] = True
+            identity_check = lambda: broadcast_delivery(api, nid, cio_id, token)
+            deadline = clock.monotonic() + opts.timeout
+            while result["delivery_id"] is None:
+                result["delivery_id"] = identity_check()
+                if result["delivery_id"] is not None:
+                    evidence["delivery_id_discovered"] = True
+                    break
+                if clock.monotonic() >= deadline:
+                    raise RunFailure("broadcast_no_delivery_timed_out")
+                clock.sleep(POLL_SECONDS)
+        else:
+            result["delivery_id"] = send(api, opts, token)
+            evidence["api_send_accepted"] = True
+        await_outcome(api, device, clock, opts, cio_id, result["delivery_id"], started_ms, before, evidence, identity_check)
         result["result"], result["reason"] = "passed", "delivered_and_callback_matched"
     except RunFailure as failure:
         result["reason"] = failure.reason
@@ -341,7 +445,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--api-base", required=True, help="App API base URL; there is no default")
     parser.add_argument("--email", required=True, help="fresh maestro+e2e-...@cio.test profile")
-    parser.add_argument("--transactional-id", type=int, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--transactional-id", type=int)
+    mode.add_argument("--create-broadcast", action="store_true", help="create a fresh background broadcast for this profile only")
     parser.add_argument("--platform", choices=("android", "ios"), required=True)
     parser.add_argument("--device", required=True, help="adb serial or simulator UDID")
     parser.add_argument("--app-id", required=True)
