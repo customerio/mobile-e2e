@@ -384,8 +384,9 @@ python3 scripts/replay_background_push.py --platform android --device emulator-5
 The helper checks callback count, exact business data, and unchanged visible notification
 count. It uses the Java sample's debug receiver and JSONL callback log. It bypasses FCM
 transport and does not prove backend receipt ingestion. The iOS simulator's `simctl push`
-rejects silent-only payloads with `Notification has no user visible content`; use the timed
-APNs sandbox lane for real iOS delivery. Do not treat the visible `--suite push` control
+rejects silent-only payloads with `Notification has no user visible content`. The tested
+iOS 27 runtime also rejects real APNs content-available delivery, so silent qualification
+requires a physical device. Do not treat the visible `--suite push` control
 or this replay as silent producer-to-provider-to-device-to-ingest evidence.
 
 ### Real background push delivery
@@ -394,7 +395,8 @@ or this replay as silent producer-to-provider-to-device-to-ingest evidence.
 single-profile broadcast and requires the
 same delivery ID in the native callback and the backend's Sent and Delivered metrics.
 The callback's business data must match exactly. Android also checks that no new
-notification record appeared; iOS display suppression is explicitly unverified.
+notification record appeared. The CLI currently qualifies Android only; its iOS
+simulator adapter fails before creating or sending a broadcast.
 
 Use a fresh profile from the existing E2E login flow, the feature SDK build, and an
 enabled background transactional template in the chosen test environment. The runner
@@ -406,21 +408,17 @@ Set `MAESTRO_APP_API_KEY` through the existing ignored environment configuration
 python3 scripts/run_background_push.py \
   --api-base "$MAESTRO_EXT_API_BASE_URL" \
   --email "$RUN_EMAIL" --transactional-id "$SILENT_PUSH_TRANSACTIONAL_ID" \
-  --platform ios --device "$IOS_UDID" \
-  --app-id io.customer.ios-sample.apn-spm.APN-UIKit \
+  --platform android --device "$ANDROID_DEVICE_SERIAL" \
+  --app-id io.customer.android.sample.java_layout \
   --data /absolute/path/to/this-run-background-data.json
 ```
 
-The data file contains a flat string map with a unique `run_id`. For Android, select
-`--platform android`, the adb device serial, and `io.customer.android.sample.java_layout`.
-Android moves the app to the background without force-stopping it. The iOS runner
-prints `READY_FOR_PROVIDER_SEND` after preflight and waits for `SEND` on stdin.
-Background the app and coordinate the APNs sandbox credential switch at that prompt.
-Restore the credential immediately after the run finishes. `--send-now` skips the
-iOS pause and records that backgrounding was not confirmed.
+The data file contains a flat string map with a unique `run_id`. Android moves
+the app to the background without force-stopping it.
 
-The final JSON distinguishes callback, provider and backend receipt evidence. Sent
-alone cannot pass. Duplicate callbacks are allowed, and an ambiguous send timeout is
+The final JSON records device callback and backend receipt evidence. A provider
+HTTP 200 and the backend Sent metric do not prove device arrival. Sent alone
+cannot pass. Duplicate callbacks are allowed, and an ambiguous send timeout is
 never retried automatically. The runner's unit tests use mocked API/device responses;
 only an actual successful provider run establishes end-to-end delivery.
 
@@ -430,6 +428,22 @@ exact email filter for the supplied synthetic profile, reads back its mode and
 data, and sends it once. It refuses profiles with more than one device and never
 accepts an existing broadcast ID. An ambiguous create or send is not retried.
 Both background push and PushV2 must be enabled on the test workspace.
+
+#### iOS silent qualification requires a physical device
+
+During real APNs qualification on November 3, 2026, the iOS 27 simulator received
+the silent push with background push type and priority 5. SpringBoard then rejected
+it with `Content-available push notifications are only supported on-device for iOS,
+watchOS, and tvOS`. A visible APNs control arrived and displayed on the same simulator.
+Local replay and visible delivery do not qualify the silent callback or receipt path.
+
+The runner reports `ios_silent_push_requires_physical_device` before any broadcast
+creation or send. A physical-device adapter is not implemented. Physical qualification
+must use the feature sample on the existing E2E iPhone, backgrounded without a
+force-quit, and verify the exact callback data and backend Sent/Delivered for one
+fresh synthetic profile. Confirm the existing APNs environment immediately before
+sending. If a timed sandbox switch is required, restore it immediately after the run;
+standalone staging already used sandbox for the simulator run.
 
 The iOS sample identifies by ID at login. Set the same synthetic address as its
 `email` profile attribute using **Set Profile Attributes** before running the

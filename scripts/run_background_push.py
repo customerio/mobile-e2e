@@ -3,8 +3,8 @@
 
 The send uses /send/push or a freshly created, single-profile broadcast, so APNs or FCM carries the message to the
 device. A pass needs the backend sent and delivered metrics for the returned
-delivery ID plus a device callback with that ID and the exact data. On iOS the
-script can't inspect SpringBoard, so display suppression stays unverified.
+delivery ID plus a device callback with that ID and the exact data. Real iOS
+qualification requires a physical device; this CLI rejects simulator targets.
 
 MAESTRO_APP_API_KEY is read from the environment only. Errors and the result
 leave out the key, the device token and the payload. The last stdout line is
@@ -142,25 +142,12 @@ class AndroidDevice:
 
 class IOSSimulator:
     def __init__(self, udid, app_id):
-        self.udid, self.app_id, self.path = udid, app_id, None
+        self.udid, self.app_id = udid, app_id
 
     def preflight(self):
-        result = run(["xcrun", "simctl", "get_app_container", self.udid, self.app_id, "data"])
-        if result.returncode != 0 or not result.stdout.strip():
-            raise RunFailure("ios_app_container_unavailable")
-        self.path = Path(result.stdout.strip()) / "Documents" / "background-push.jsonl"
-        return None  # the operator confirms backgrounding at the send gate
-
-    def callbacks(self):
-        try:
-            return parse_rows(self.path.read_text())
-        except FileNotFoundError:
-            return []
-        except OSError:
-            raise RunFailure("ios_callback_log_unreadable") from None
-
-    def notification_snapshot(self):
-        return None  # SpringBoard state is out of reach here
+        # The tested iOS 27 simulator discards content-available pushes before
+        # invoking the app. It cannot qualify the real silent delivery path.
+        raise RunFailure("ios_silent_push_requires_physical_device")
 
 
 def validate(opts):
@@ -353,7 +340,7 @@ def await_outcome(api, device, clock, opts, cio_id, delivery_id, started_ms, bef
             raise RunFailure("callback_before_send")
         # Delivery is at least once, so duplicate rows for the ID are allowed.
         evidence["callback_count"] = len(rows)
-        evidence["device_callback_matched"] = evidence["provider_traversed"] = bool(rows)
+        evidence["device_callback_matched"] = bool(rows)
         if before is not None:
             unchanged = device.notification_snapshot().issubset(before)
             evidence["android_no_added_notification_observed"] = unchanged
@@ -374,7 +361,6 @@ def execute(opts, api, device, clock=Clock, stdin=sys.stdin, stdout=sys.stdout):
         "backend_delivered_metric": False,
         "device_callback_matched": False,
         "callback_count": 0,
-        "provider_traversed": False,
         "app_backgrounded": None,
         "android_no_added_notification_observed": None,
         "ios_no_display_verified": False if opts.platform == "ios" else None,
@@ -449,7 +435,7 @@ def main(argv=None):
     mode.add_argument("--transactional-id", type=int)
     mode.add_argument("--create-broadcast", action="store_true", help="create a fresh background broadcast for this profile only")
     parser.add_argument("--platform", choices=("android", "ios"), required=True)
-    parser.add_argument("--device", required=True, help="adb serial or simulator UDID")
+    parser.add_argument("--device", required=True, help="adb serial; iOS simulator targets are rejected")
     parser.add_argument("--app-id", required=True)
     parser.add_argument("--data", required=True, help="flat JSON string map, inline or a file path; must include run_id")
     parser.add_argument("--send-now", action="store_true", help="iOS: skip the READY_FOR_PROVIDER_SEND confirmation")
