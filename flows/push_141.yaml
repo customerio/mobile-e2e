@@ -1,0 +1,11 @@
+appId: ${APP_ID}
+tags:
+  - push-141
+name: E2E — Push 141 sent, delivered and opened
+---
+# Uses the same fresh profile and campaign trigger without requiring in-app
+# dispatch or inline visual assertions. Push checks remain mandatory.
+- runFlow:
+    file: campaign_141.yaml
+    env:
+      PUSH_ONLY: "true"

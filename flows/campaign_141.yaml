@@ -74,7 +74,11 @@ name: E2E — Campaign 141 full loop with real push delivery
     when:
       visible: "Continue"
     commands:
-      - assertVisible: ".*Thank you for choosing.*"
+      - runFlow:
+          when:
+            true: ${typeof PUSH_ONLY !== "string" || PUSH_ONLY !== "true"}
+          commands:
+            - assertVisible: ".*Thank you for choosing.*"
       - takeScreenshot: artifacts/c141_01_welcome_modal
       - tapOn: "Continue"
 
@@ -197,16 +201,21 @@ name: E2E — Campaign 141 full loop with real push delivery
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 
-# --- Backend assertion #2: in-app action dispatched ---
-- runScript:
-    file: ../scripts/assert_message_delivered.js
-    env:
-      RUN_EMAIL: ${output.email}
-      EXPECTED_TYPE: "in_app"
-      MIN_METRIC: "sent"
-      CAMPAIGN_ID: "141"
-      MAX_WAIT_MS: "45000"
-- assertTrue: ${output.assert_ok === "true"}
+# The push suite has no dependency on in-app dispatch. The full campaign suite
+# still requires its existing in-app assertion.
+- runFlow:
+    when:
+      true: ${typeof PUSH_ONLY !== "string" || PUSH_ONLY !== "true"}
+    commands:
+      - runScript:
+          file: ../scripts/assert_message_delivered.js
+          env:
+            RUN_EMAIL: ${output.email}
+            EXPECTED_TYPE: "in_app"
+            MIN_METRIC: "sent"
+            CAMPAIGN_ID: "141"
+            MAX_WAIT_MS: "45000"
+      - assertTrue: ${output.assert_ok === "true"}
 
 # --- Dismiss any modal Campaign 141 raised ---
 - runFlow:
@@ -224,6 +233,7 @@ name: E2E — Campaign 141 full loop with real push delivery
 - runFlow:
     when:
       visible: ".*Inline Examples.*"
+      true: ${typeof PUSH_ONLY !== "string" || PUSH_ONLY !== "true"}
     commands:
       - tapOn: ".*Inline Examples.*"
       - waitForAnimationToEnd:
@@ -271,6 +281,19 @@ name: E2E — Campaign 141 full loop with real push delivery
       id: "custom_event_button"
     timeout: 10000
 
+# --- Backend assertion: provider accepted the push ---
+- runScript:
+    file: ../scripts/assert_message_delivered.js
+    env:
+      RUN_EMAIL: ${output.email}
+      EXPECTED_TYPE: "push"
+      MIN_METRIC: "sent"
+      CAMPAIGN_ID: "141"
+      MAX_WAIT_MS: "60000"
+- assertTrue: ${output.assert_ok === "true"}
+- assertTrue: ${typeof output.message_id === "string" && output.message_id.length > 0 && output.message_id !== "undefined" && output.message_id !== "null"}
+- evalScript: ${output.push_message_id = output.message_id}
+
 # --- Backend assertion #3: this push reached the device ---
 # Run this before opening the system surface so iOS does not capture an empty
 # Notification Center while the push is still in flight.
@@ -280,6 +303,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       RUN_EMAIL: ${output.email}
       EXPECTED_TYPE: "push"
       MIN_METRIC: "delivered"
+      EXPECTED_MESSAGE_ID: ${output.push_message_id}
       CAMPAIGN_ID: "141"
       MAX_WAIT_MS: "60000"
 - assertTrue: ${output.assert_ok === "true"}
@@ -352,7 +376,7 @@ name: E2E — Campaign 141 full loop with real push delivery
       EXPECTED_TYPE: "push"
       MIN_METRIC: "opened"
       CAMPAIGN_ID: "141"
-      EXPECTED_MESSAGE_ID: ${output.message_id}
+      EXPECTED_MESSAGE_ID: ${output.push_message_id}
       MAX_WAIT_MS: "45000"
 - assertTrue: ${output.assert_ok === "true"}
 

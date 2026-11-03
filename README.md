@@ -240,6 +240,11 @@ is pointed at the shared flow:
 maestro test .maestro/harness/flows/campaign_141.yaml
 ```
 
+Run push independently with `./e2e run --platform <android|ios> --suite push`.
+This suite requires the exact trigger event, push Sent, Delivered and Opened on
+the same message ID. It dismisses any in-app overlays needed to reach the sample
+controls, but does not require in-app dispatch or inline content.
+
 `campaign_141.yaml` is an integration flow whose supported entrypoint is the
 top-level `./e2e run --platform <android|ios> --suite campaign` command. It needs
 the runner's fresh install and device/backend preflight; the raw Maestro command
@@ -321,7 +326,7 @@ run the backend job. Each matrix job provisions its own virtual device, builds
 the SDK sample from source, and uploads `artifacts/e2e/` even on failure. The
 workflow result is the aggregate gate; individual jobs retain isolated evidence.
 
-The legacy `campaign` and `inline` suites remain available locally for
+The `campaign`, `push` and `inline` suites remain available locally for
 workspaces/devices that meet their prerequisites; they are not offered as CI
 choices because the current virtual-device lane cannot prove real push delivery
 and the inline campaign is not deterministically seeded yet.
@@ -363,3 +368,96 @@ correlates the SDK-minted instance with device-sourced Customer.io start/end
 deliveries, and proves real APNs sandbox delivery by matching a unique run id in
 ActivityKit after each App API operation; a backend `sent` status alone is not
 treated as device receipt.
+
+### Background push callback replay
+
+After building and installing the native Android feature sample, replay the unchanged
+Go codec fixture through the SDK's public FCM entry point:
+
+```sh
+python3 scripts/replay_background_push.py --platform android --device emulator-5580 \
+  --app-id io.customer.android.sample.java_layout \
+  --payload /absolute/path/to/services/deliveries/backgroundpush/testdata/android_fcm.json \
+  --repeat 2
+```
+
+The helper checks callback count, exact business data, and unchanged visible notification
+count. It uses the Java sample's debug receiver and JSONL callback log. It bypasses FCM
+transport and does not prove backend receipt ingestion. Our iOS 26.5 and 27.0 simulators
+rejected real APNs background pushes; see the qualification note
+below. Do not treat the visible `--suite push` control
+or this replay as silent producer-to-provider-to-device-to-ingest evidence.
+
+### Real background push delivery
+
+`scripts/run_background_push.py` sends one real transactional push or creates a fresh
+single-profile broadcast and requires the
+same delivery ID in the native callback and the backend's Sent and Delivered metrics.
+The callback's business data must match exactly. Android also checks that no new
+notification record appeared; iOS display suppression is explicitly unverified.
+
+Use a fresh profile from the existing E2E login flow, the feature SDK build, and an
+enabled background transactional template in the chosen test environment. The runner
+checks the template's explicit mode and the device's receiver readiness before sending.
+It never edits existing templates and refuses customer emails outside `maestro+e2e-...@cio.test`.
+Set `MAESTRO_APP_API_KEY` through the existing ignored environment configuration.
+
+```sh
+python3 scripts/run_background_push.py \
+  --api-base "$MAESTRO_EXT_API_BASE_URL" \
+  --email "$RUN_EMAIL" --transactional-id "$SILENT_PUSH_TRANSACTIONAL_ID" \
+  --platform android --device "$ANDROID_DEVICE_SERIAL" \
+  --app-id io.customer.android.sample.java_layout \
+  --data /absolute/path/to/this-run-background-data.json
+```
+
+The data file contains a flat string map with a unique `run_id`. Android moves
+the app to the background without force-stopping it.
+For iOS, select `--platform ios`, the simulator UDID and
+`io.customer.ios-sample.apn-spm.APN-UIKit`. The runner prints
+`READY_FOR_PROVIDER_SEND` and waits for `SEND` after preflight. Background the app
+and confirm the existing APNs environment at that prompt. If a timed sandbox switch
+is required, restore it immediately after the run; standalone staging already used
+sandbox for the recorded run. `--send-now` skips this confirmation.
+
+The final JSON records device callback and backend receipt evidence. A provider
+HTTP 200 and the backend Sent metric do not prove device arrival. Sent alone
+cannot pass. Duplicate callbacks are allowed, and an ambiguous send timeout is
+never retried automatically. The runner's unit tests use mocked API/device responses;
+only an actual successful provider run establishes end-to-end delivery.
+
+For the broadcast path, replace `--transactional-id ...` with `--create-broadcast`
+and use `--timeout 300`. The runner creates a new background push draft with an
+exact email filter for the supplied synthetic profile, reads back its mode and
+data, and sends it once. It refuses profiles with more than one device and never
+accepts an existing broadcast ID. An ambiguous create or send is not retried.
+Both background push and PushV2 must be enabled on the test workspace.
+
+#### iOS simulator qualification
+
+During real APNs qualification on November 3, 2026, simulators running iOS 26.5
+(23F77) and 27.0 (24A434), on Xcode 27.2, received silent pushes with background push
+type and priority 5. SpringBoard then rejected them with `Content-available push
+notifications are only supported on-device for iOS, watchOS, and tvOS`, before the app
+callback. A second real send with the 26.5 app foregrounded received the same error.
+The target token hashes matched the backend, the receiver reported readiness, and the
+in-app receipt sender used the staging API host. A visible APNs control arrived and
+displayed on 27.0. These findings cover the tested builds, not every simulator.
+Apple documents simulated background-content-fetch notifications in the
+[Xcode 11.4 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-11_4-release-notes)
+and remote APNs sandbox support in the
+[Xcode 14 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-14-release-notes).
+An [Apple engineer discusses silent delivery and throttling on Simulator](https://developer.apple.com/forums/thread/795163).
+In a separate minimal app, local `simctl` injection with the `fetch` background mode
+invoked `performFetchWithCompletionHandler` on both runtimes, rather than the remote
+notification handler. That callback carries no push payload and cannot validate the
+SDK's silent-push handler. The feature sample retains `remote-notification` mode.
+
+The runner permits simulator tests, but iOS qualification still requires a matching
+native callback and backend Delivered metric. Those have not passed on these runtimes;
+a physical-device run remains necessary in this test environment. Local background
+fetch and a visible control cannot establish silent remote delivery.
+
+The iOS sample identifies by ID at login. Set the same synthetic address as its
+`email` profile attribute using **Set Profile Attributes** before running the
+email lookup and audience checks.

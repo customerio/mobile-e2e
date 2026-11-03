@@ -92,7 +92,7 @@ usage() {
   printf '             [--suite NAME] [--android-sdk-repo PATH] [--ios-sdk-repo PATH]\n'
   printf '             [--keep-device] [--headless]\n'
   printf '  ./e2e doctor --platform android|ios [--sdk-repo PATH]\n'
-  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|inline|message-inbox|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
+  printf '  ./e2e run --platform android|ios [--suite smoke|geofence|campaign|push|inline|message-inbox|live-activities|live-activities-remote|live-notifications|live-notifications-remote]\n'
   printf '            [--flow FILE] [--sdk-repo PATH] [--skip-build] [--keep-device] [--headless]\n'
   printf '\nEnvironment overrides:\n'
   printf '  ANDROID_SDK_REPO, IOS_SDK_REPO, MAESTRO_EXT_API_BASE_URL,\n'
@@ -155,6 +155,7 @@ if [[ -z "$FLOW" ]]; then
     smoke) FLOW="smoke_login_event.yaml" ;;
     geofence) FLOW="geofence_basic.yaml" ;;
     campaign) FLOW="campaign_141.yaml" ;;
+    push) FLOW="push_141.yaml" ;;
     inline) FLOW="inline_messages.yaml" ;;
     message-inbox|inbox) FLOW="message_inbox.yaml" ;;
     live-activities|live-activities-remote) FLOW="live_activities.yaml" ;;
