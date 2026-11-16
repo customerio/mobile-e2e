@@ -174,16 +174,50 @@ android_maestro_transport_failed_at_launch "$TRANSPORT_ARTIFACTS"
 
 ADB_STATE="device"
 ADB_BOOTED="1"
+# A reboot takes the device offline for ADB_REBOOT_OFFLINE_POLLS get-state calls.
+# State lives in files because callers read these answers in command
+# substitutions, where variable changes would be lost.
+ADB_LOG="$TEST_DIR/adb-calls.log"
+ADB_REBOOT_FAILS=0
+ADB_REBOOT_OFFLINE_POLLS=2
+ADB_REBOOT_NEVER_GOES_DOWN=0
+sleep() { :; }
 adb() {
-  if [[ "$*" == "start-server" ]]; then
-    return 0
-  elif [[ "$*" == *" get-state" ]]; then
-    printf '%s\n' "$ADB_STATE"
-  elif [[ "$*" == *" shell getprop sys.boot_completed" ]]; then
-    printf '%s\n' "$ADB_BOOTED"
-  else
-    return 64
-  fi
+  local polls
+  printf '%s\n' "$*" >>"$ADB_LOG"
+  case "$*" in
+    "start-server") return 0 ;;
+    *" reboot")
+      [[ "$ADB_REBOOT_FAILS" -eq 0 ]] || return 1
+      [[ "$ADB_REBOOT_NEVER_GOES_DOWN" -eq 1 ]] ||
+        printf '%s' "$ADB_REBOOT_OFFLINE_POLLS" >"$TEST_DIR/adb-offline-polls"
+      ;;
+    *" get-state")
+      if [[ -f "$TEST_DIR/adb-offline-polls" ]]; then
+        polls=$(<"$TEST_DIR/adb-offline-polls")
+        if [[ "$polls" -gt 0 ]]; then
+          printf '%s' $((polls - 1)) >"$TEST_DIR/adb-offline-polls"
+          printf '%s\n' offline
+          return 0
+        fi
+      fi
+      printf '%s\n' "$ADB_STATE"
+      ;;
+    *" shell getprop sys.boot_completed")
+      if [[ -f "$TEST_DIR/adb-offline-polls" ]] &&
+         [[ "$(<"$TEST_DIR/adb-offline-polls")" -gt 0 ]]; then
+        printf '%s\n' 0
+      else
+        printf '%s\n' "$ADB_BOOTED"
+      fi
+      ;;
+    *" shell pm path android") printf '%s\n' 'package:/system/framework/framework-res.apk' ;;
+    *" shell cat /proc/uptime") printf '%s\n' '12.34 10.00' ;;
+    *" shell input keyevent 82") return 0 ;;
+    "devices -l") printf '%s\n' 'emulator-5554 device product:sdk' ;;
+    *" logcat -d -b crash -t 80") printf '%s\n' 'crash buffer line' ;;
+    *) return 64 ;;
+  esac
 }
 ANDROID_RETRY_CALLS=0
 ANDROID_RETRY_RESULT=0
@@ -219,6 +253,15 @@ grep -Fq 'first Android live diagnostics' \
 grep -Fq 'Recovered from an Android device transport failure' \
   "$TRANSPORT_ARTIFACTS/run.log"
 [[ -z "${E2E_RECOVERY_ATTEMPT+x}" ]]
+# The device is rebooted before the retry, and its state is recorded both at the
+# failure and after the restart.
+grep -Fxq -- '-s emulator-5554 reboot' "$ADB_LOG"
+grep -Fq '== at failure' \
+  "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
+grep -Fq '== after restart' \
+  "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
+grep -Fq '12.34 10.00' \
+  "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
 
 # A failed retry must keep the retry status and must not claim recovery.
 ANDROID_RETRY_CALLS=0
@@ -344,5 +387,114 @@ unset ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS
 grep -Eq '^::warning::Android device went offline .* suite geofence;' \
   "$RECOVERY_OUTPUT"
 [[ "$(grep -c 'suite geofence' "$GITHUB_STEP_SUMMARY")" -eq 1 ]]
+
+# A device that reconnects but cannot be rebooted, or never goes down after the
+# reboot command, keeps the original result: a retry on a device in an unknown
+# state would only add a second failure.
+printf '%s\n' \
+  '16:39:01.400 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Launch app "app" RUNNING' \
+  '16:39:01.644 [ERROR] maestro.orchestra.Orchestra.executeCommands: [Command execution] CommandFailed: device offline' \
+  '16:39:01.679 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandFinished: Launch app "app" FAILED' \
+  >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
+ADB_STATE="device"
+ADB_BOOTED="1"
+ANDROID_DEVICE_DOWN_TIMEOUT_SECONDS=1
+for restart_failure in ADB_REBOOT_FAILS ADB_REBOOT_NEVER_GOES_DOWN; do
+  rm -f "$TEST_DIR/adb-offline-polls"
+  : >"$ADB_LOG"
+  ANDROID_RETRY_CALLS=0
+  printf -v "$restart_failure" '%s' 1
+  set +e
+  # The wait for the device to go down runs against $SECONDS, so shorten it.
+  run_android_transport_recovery_once \
+    7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+    >"$RECOVERY_OUTPUT"
+  android_recovery_result=$?
+  set -e
+  printf -v "$restart_failure" '%s' 0
+  [[ "$android_recovery_result" -eq 7 ]]
+  [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+  grep -Fq 'after failed restart' \
+    "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
+done
+
+unset ANDROID_DEVICE_DOWN_TIMEOUT_SECONDS
+# A driver or ADB drop after the first launch is retried while the SDK has not
+# yet identified this run's customer (the Maestro driver dying mid-login).
+rm -f "$TEST_DIR/adb-offline-polls"
+ADB_STATE="device"
+ADB_BOOTED="1"
+SUITE="geofence"
+PRE_IDENTIFY_EMAIL="maestro+e2e-abc123@cio.test"
+write_pre_identify_fixture() {
+  printf '%s\n' \
+    '16:39:00.482 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/setup_run.js RUNNING' \
+    '16:39:01.400 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Launch app "app" RUNNING' \
+    '16:39:01.679 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandFinished: Launch app "app" COMPLETED' \
+    '16:39:05.100 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/wait.js RUNNING' \
+    '16:39:08.200 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Input text Maestro Geofence Tester RUNNING' \
+    'maestro.android.DeviceServerDiedException: Device server died during '"'"'viewHierarchy'"'"' on emulator-5554' \
+    >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
+  printf '{"kind": "setup", "run_id": "abc123", "email": "%s", "path": "/setup"}\n' \
+    "$PRE_IDENTIFY_EMAIL" >"$TRANSPORT_ARTIFACTS/sink.jsonl"
+  printf '%s\n' 'screen LoginActivity' >"$TRANSPORT_ARTIFACTS/device-live.log"
+  : >"$TRANSPORT_ARTIFACTS/run.log"
+}
+run_pre_identify_recovery() {
+  ANDROID_RETRY_CALLS=0
+  ANDROID_RETRY_RESULT=0
+  set +e
+  run_android_transport_recovery_once \
+    7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+    >"$RECOVERY_OUTPUT"
+  android_recovery_result=$?
+  set -e
+}
+
+write_pre_identify_fixture
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 0 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
+grep -Eq '^::warning::Android device went offline .* suite geofence;' \
+  "$RECOVERY_OUTPUT"
+
+# Once the run's customer shows up in the SDK log the app is logged in, so the
+# original failure stands.
+write_pre_identify_fixture
+printf '%s\n' "identify userId=$PRE_IDENTIFY_EMAIL" \
+  >>"$TRANSPORT_ARTIFACTS/device-live.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# A script other than setup_run.js and wait.js may have mutated the backend.
+write_pre_identify_fixture
+printf '%s\n' \
+  '16:39:06.000 [ INFO] maestro.cli.runner.CliConsoleListener.onCommandStart: Run ../scripts/send_inbox_message.js RUNNING' \
+  >>"$TRANSPORT_ARTIFACTS/debug/maestro.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# Without the run's email or the live SDK log there is no proof that nothing was
+# identified, so nothing is retried.
+write_pre_identify_fixture
+rm "$TRANSPORT_ARTIFACTS/sink.jsonl"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+write_pre_identify_fixture
+rm "$TRANSPORT_ARTIFACTS/device-live.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# A failure that is not a transport drop is never retried.
+write_pre_identify_fixture
+sed -i.bak 's/DeviceServerDiedException/AssertionError/' \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
 
 echo "Android device fallback tests passed"
