@@ -22,6 +22,14 @@ name: Smoke — identify → custom event persisted
     commands:
       - launchApp:
           clearState: true
+          # Name the grants: without `permissions`, Maestro pulls the app's APK
+          # over adb to read its permission list, and on a fresh hosted
+          # emulator that first pull can drop the ADB transport.
+          permissions:
+            android.permission.ACCESS_FINE_LOCATION: allow
+            android.permission.ACCESS_COARSE_LOCATION: allow
+            android.permission.ACCESS_BACKGROUND_LOCATION: allow
+            android.permission.POST_NOTIFICATIONS: allow
 - runFlow:
     when:
       platform: iOS
