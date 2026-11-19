@@ -273,7 +273,8 @@ sample-app installation.
 - Android SDK/emulator for Android; full Xcode with an iOS runtime for iOS
 - Java 17 and the SDK repo's normal build prerequisites
 - Python 3; Pillow is optional but required for annotated MP4 rendering
-- `ffmpeg` on PATH (video assembly + annotated composite)
+- `ffmpeg` on PATH (video assembly + annotated composite); required for iOS,
+  optional on Android
 - Maestro CLI 2.6.0 or newer
 - Customer.io App API key in `MAESTRO_APP_API_KEY`; the same credential is used
   for Ext API assertions, Inbox sends, and remote Live Notifications operations
@@ -284,7 +285,11 @@ sample-app installation.
 
 `./e2e doctor --platform <platform>` reports missing prerequisites before any
 build starts. A missing Pillow installation is a warning: Maestro, JUnit/HTML,
-screenshots, raw video, device logs, and backend sink evidence still work.
+screenshots, raw video, device logs, and backend sink evidence still work. On
+Android a missing `ffmpeg` is a warning too: the recording stays as adb's raw
+MP4 segments and the annotated video is skipped. iOS still requires `ffmpeg`,
+because its recording is a folder of 5fps frames with no video until ffmpeg
+assembles one.
 
 The Message Inbox suite covers both surfaces. Its first delivery exercises the
 SDK's build-your-own/data API (render, read, unread, click, and delete). After
