@@ -171,6 +171,13 @@ printf '%s\n' \
   >"$TRANSPORT_ARTIFACTS/debug/maestro.log"
 printf '%s\n' 'first Android attempt' >"$TRANSPORT_ARTIFACTS/run.log"
 android_maestro_transport_failed_at_launch "$TRANSPORT_ARTIFACTS"
+# Over TCP a dropped device is removed rather than reported offline, so Maestro
+# says it is not found.
+sed -i.bak \
+  -e "s/: device offline/: device '127.0.0.1:5600' not found/" \
+  -e '/DeviceServerDiedException/d' \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+android_maestro_transport_failed_at_launch "$TRANSPORT_ARTIFACTS"
 
 ADB_STATE="device"
 ADB_BOOTED="1"
@@ -181,13 +188,22 @@ ADB_LOG="$TEST_DIR/adb-calls.log"
 ADB_REBOOT_FAILS=0
 ADB_REBOOT_OFFLINE_POLLS=2
 ADB_REBOOT_NEVER_GOES_DOWN=0
-# adbd answers on TCP only after `tcpip`, until the next reboot, and only while
-# ADB_TCP_ANSWERS is 1. State lives in files for the same reason as above.
+# adbd answers on TCP only after `tcpip` (until the next reboot) or when it
+# listens there by default (ADB_TCP_DEFAULT_LISTENER), and only while
+# ADB_TCP_ANSWERS is 1. ADB_TCP_BOOT_ID is the boot_id whatever answers on the
+# TCP port reports. State lives in files for the same reason as above.
 ADB_TCP_ANSWERS=1
+ADB_TCP_DEFAULT_LISTENER=0
+ADB_TCP_BOOT_ID="boot-a"
+adb_tcp_listening() {
+  [[ "$ADB_TCP_DEFAULT_LISTENER" -eq 1 || -f "$TEST_DIR/adb-tcpip" ]]
+}
 sleep() { :; }
 adb() {
   local polls
   printf '%s\n' "$*" >>"$ADB_LOG"
+  # Every command over TCP fails once the connection is gone.
+  [[ "$*" != "-s 127.0.0.1:5600 "* || -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
   case "$*" in
     "start-server") return 0 ;;
     "disconnect "*) rm -f "$TEST_DIR/adb-tcp-connected" ;;
@@ -196,8 +212,14 @@ adb() {
       [[ ! -f "$TEST_DIR/adb-tcpip" ]] || printf '%s\n' 5555
       ;;
     *" emu redir add tcp:5600:5555") printf '%s\n' OK ;;
+    *" shell cat /proc/net/tcp /proc/net/tcp6")
+      printf '%s\n' '  sl  local_address rem_address   st tx_queue rx_queue'
+      printf '%s\n' '   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:00000000'
+      ! adb_tcp_listening ||
+        printf '%s\n' '   1: 00000000:15B3 00000000:0000 0A 00000000:00000000 00:00000000'
+      ;;
     "connect 127.0.0.1:5600")
-      if [[ "$ADB_TCP_ANSWERS" -eq 1 && -f "$TEST_DIR/adb-tcpip" ]]; then
+      if [[ "$ADB_TCP_ANSWERS" -eq 1 ]] && adb_tcp_listening; then
         : >"$TEST_DIR/adb-tcp-connected"
         printf '%s\n' 'connected to 127.0.0.1:5600'
       else
@@ -213,6 +235,11 @@ adb() {
       [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
       printf '%s\n' 1
       ;;
+    "-s 127.0.0.1:5600 shell cat /proc/sys/kernel/random/boot_id")
+      [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
+      printf '%s\r\n' "$ADB_TCP_BOOT_ID"
+      ;;
+    *" shell cat /proc/sys/kernel/random/boot_id") printf '%s\r\n' boot-a ;;
     *" reboot")
       [[ "$ADB_REBOOT_FAILS" -eq 0 ]] || return 1
       # A reboot ends adbd's TCP listener and the connection to it.
@@ -531,10 +558,14 @@ reset_adb_tcp() {
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
+  ADB_TCP_DEFAULT_LISTENER=0
+  ADB_TCP_BOOT_ID="boot-a"
   ADB_STATE="device"
   ADB_BOOTED="1"
   unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
 }
+# TCP is on by default in CI and headless runs; these tests run as headless.
+HEADLESS=1
 reset_adb_tcp
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
 [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
@@ -544,6 +575,7 @@ grep -Fxq -- '-s emulator-5554 emu redir add tcp:5600:5555' "$ADB_LOG"
 grep -Fxq -- 'connect 127.0.0.1:5600' "$ADB_LOG"
 grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -Fq 'connected to 127.0.0.1:5600' "$TEST_DIR/adb-transport.log"
+grep -Fxq 'boot_id boot-a on both serials' "$TEST_DIR/adb-transport.log"
 # Once adbd listens on TCP, a second switch does not restart it again.
 : >"$ADB_LOG"
 use_android_adb_over_tcp emulator-5554
@@ -572,6 +604,66 @@ unset ANDROID_ADB_TCP_PORT
 [[ "$ANDROID_ADB_SERIAL" == "emulator-5554" ]]
 [[ ! -s "$ADB_LOG" ]]
 
+# Outside CI and headless runs the switch is off unless ANDROID_ADB_TCP_PORT
+# asks for it.
+reset_adb_tcp
+CI="" HEADLESS=0 use_android_adb_over_tcp emulator-5554
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" ]]
+[[ ! -s "$ADB_LOG" ]]
+grep -Fq 'TCP is the default only in CI or --headless' <<<"$NOTES"
+reset_adb_tcp
+CI=true HEADLESS=0 use_android_adb_over_tcp emulator-5554
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+reset_adb_tcp
+CI="" HEADLESS=0 ANDROID_ADB_TCP_PORT=5600 use_android_adb_over_tcp emulator-5554
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+
+# When adbd already listens on TCP by default, no `adb tcpip` restarts it.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+if grep -Fq 'tcpip' "$ADB_LOG"; then
+  echo "expected no adb tcpip when adbd already listens on tcp:5555" >&2
+  exit 1
+fi
+grep -Fq 'adbd already listens on tcp:5555' "$TEST_DIR/adb-transport.log"
+
+# Something else answering on the port (another emulator's redirect, a stale
+# one) is never used: its boot_id differs from the emulator's.
+reset_adb_tcp
+ADB_TCP_BOOT_ID="boot-b"
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"; printf 'serial=%s\n' "$ANDROID_ADB_SERIAL")
+grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
+grep -Fq '::warning::adb transport: emulator pipe (emulator-5554); 127.0.0.1:5600 is another device (boot_id boot-b, not boot-a)' <<<"$TCP_OUTPUT"
+[[ "$(tail -n 1 "$ADB_LOG")" == "disconnect 127.0.0.1:5600" ]]
+
+# Evidence goes over TCP while it answers, and through the emulator serial once
+# TCP has dropped.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554
+[[ "$(android_evidence_serial 127.0.0.1:5600 emulator-5554)" == "127.0.0.1:5600" ]]
+rm -f "$TEST_DIR/adb-tcp-connected"
+[[ "$(android_evidence_serial 127.0.0.1:5600 emulator-5554)" == "emulator-5554" ]]
+[[ "$(android_evidence_serial emulator-5554 emulator-5554)" == "emulator-5554" ]]
+[[ "$(android_evidence_serial emulator-5554 "")" == "emulator-5554" ]]
+
+# A command that hangs is cut off at its deadline (at least 2 seconds).
+STARTED_AT=$SECONDS
+set +e
+android_run_until $((SECONDS + 1)) /bin/sleep 30
+RUN_UNTIL_RESULT=$?
+set -e
+[[ "$RUN_UNTIL_RESULT" -eq 124 ]]
+(( SECONDS - STARTED_AT <= 5 ))
+android_run_until $((SECONDS + 5)) true
+[[ "$(android_run_until $((SECONDS + 5)) printf ok)" == ok ]]
+set +e
+android_run_until $((SECONDS + 5)) false
+RUN_UNTIL_RESULT=$?
+set -e
+[[ "$RUN_UNTIL_RESULT" -eq 1 ]]
+
 # A drop on TCP reboots through the emulator, whose transport survives the
 # reboot, then moves the retry back onto TCP, since the reboot ended adbd's
 # TCP listener.
@@ -588,6 +680,26 @@ grep -Fxq -- '-s emulator-5554 reboot' "$ADB_LOG"
 grep -Fq '== after restart' \
   "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
 grep -Fq 'switching emulator-5554 to 127.0.0.1:5600' "$TRANSPORT_ARTIFACTS/adb-transport.log"
+# The guest is asked through the emulator serial, and the TCP serial's own
+# state is recorded beside it.
+grep -Fxq -- '-- get-state 127.0.0.1:5600' \
+  "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
+grep -Fxq -- '-s emulator-5554 shell cat /proc/uptime' "$ADB_LOG"
+if grep -Fq -- '-s 127.0.0.1:5600 shell cat /proc/uptime' "$ADB_LOG"; then
+  echo "expected guest diagnostics through the emulator serial" >&2
+  exit 1
+fi
+
+# A drop that leaves the TCP serial missing ("not found") is retried too.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554
+write_pre_identify_fixture
+sed -i.bak \
+  "s/maestro.android.DeviceServerDiedException: .*/CommandFailed: device '127.0.0.1:5600' not found/" \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+run_pre_identify_recovery 127.0.0.1:5600
+[[ "$android_recovery_result" -eq 0 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
 
 # If TCP does not come back after the reboot, the retry runs on the emulator
 # pipe rather than on a serial that no longer answers.
