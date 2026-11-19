@@ -212,46 +212,68 @@ if [[ "$PLATFORM" == Android ]]; then
   mkdir -p "$ANDROID_RECORD_DIR"
   find "$ANDROID_RECORD_DIR" -mindepth 1 -delete
   rm -f "$ANDROID_RECORD_STOP"
-  # Segments stay on the device until Maestro exits: a pull at each 170 s
-  # rollover is a bulk transfer over the same ADB transport Maestro drives.
+  # Segments stay on the device until Maestro exits, so the rollover no longer
+  # pulls a file over the ADB transport Maestro is driving.
   adb -s "$ANDROID_DEVICE" shell 'rm -f /sdcard/maestro-run-*.mp4' >/dev/null 2>&1 || true
+  # When each segment started and stopped (UTC), to line a rollover up against
+  # the time of a transport drop. A device retry appends to the first attempt's.
+  ANDROID_SEGMENT_LOG="$OUT_DIR/screenrecord-segments.log"
+  [[ "${E2E_RECOVERY_ATTEMPT:-0}" == 1 ]] || : >"$ANDROID_SEGMENT_LOG"
+  android_segment_log() {
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" \
+      >>"$ANDROID_SEGMENT_LOG" 2>/dev/null || true
+  }
   record_android_segments() {
-    local index=0 free_kb
+    local index=0 free_kb name rc
     while [[ ! -f "$ANDROID_RECORD_STOP" ]]; do
+      name="maestro-run-$(printf '%04d' "$index").mp4"
       # A segment is about 3.5 MB in practice and 85 MB at the bit-rate cap.
-      # Stop recording rather than fill the device the app under test runs on.
+      # Stop recording well above Android's low-storage threshold rather than
+      # fill the device the app under test runs on. An offline device answers
+      # nothing; that must not end the recorder.
       free_kb=$(adb -s "$ANDROID_DEVICE" shell df -k /sdcard/ 2>/dev/null |
-        tr -d '\r' | awk 'NR == 2 { print $4 }')
-      if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 200000 )); then
+        tr -d '\r' | awk 'NR == 2 { print $4 }') || free_kb=""
+      if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 600000 )); then
         echo "warn: Android screen recording stopped; ${free_kb} KB free on the device"
+        android_segment_log "stopped recording: ${free_kb} KB free"
         break
       fi
+      android_segment_log "start $name"
+      rc=0
+      adb -s "$ANDROID_DEVICE" shell screenrecord \
+        --size 720x1600 --bit-rate 4000000 --time-limit 170 "/sdcard/$name" \
+        >/dev/null 2>&1 || rc=$?
+      android_segment_log "stop $name exit=$rc"
       # A failed start means the device is offline or wedged; pause so the
       # loop does not hammer a dropped transport with back-to-back adb calls.
-      adb -s "$ANDROID_DEVICE" shell screenrecord \
-        --size 720x1600 --bit-rate 4000000 --time-limit 170 \
-        "/sdcard/maestro-run-$(printf '%04d' "$index").mp4" \
-        >/dev/null 2>&1 || sleep 2
+      (( rc == 0 )) || sleep 2
       index=$((index + 1))
     done
   }
   pull_android_segments() {
-    local remote deadline=$((SECONDS + 20))
+    local remote name deadline=$((SECONDS + 20))
     # After a drop the device usually reconnects within seconds; without it
     # the segments cannot be fetched.
     until [[ "$(adb -s "$ANDROID_DEVICE" get-state 2>/dev/null | tr -d '\r')" == device ]]; do
       if (( SECONDS >= deadline )); then
         echo "warn: Android device offline; screen recording segments left on the device"
+        android_segment_log "device offline; segments left on the device"
         return 0
       fi
       sleep 1
     done
     for remote in $(adb -s "$ANDROID_DEVICE" shell 'ls /sdcard/maestro-run-*.mp4' 2>/dev/null |
       tr -d '\r' | grep '\.mp4$' | sort); do
-      adb -s "$ANDROID_DEVICE" pull "$remote" \
-        "$ANDROID_RECORD_DIR/segment-${remote##*/maestro-run-}" >/dev/null 2>&1 || true
+      name="${remote##*/}"
+      # Only a segment that reached the host is deleted from the device.
+      if adb -s "$ANDROID_DEVICE" pull "$remote" \
+        "$ANDROID_RECORD_DIR/segment-${name#maestro-run-}" >/dev/null 2>&1; then
+        android_segment_log "pulled $name"
+        adb -s "$ANDROID_DEVICE" shell rm -f "$remote" >/dev/null 2>&1 || true
+      else
+        android_segment_log "pull failed $name; left on the device"
+      fi
     done
-    adb -s "$ANDROID_DEVICE" shell 'rm -f /sdcard/maestro-run-*.mp4' >/dev/null 2>&1 || true
   }
   record_android_segments &
   REC_PID=$!
