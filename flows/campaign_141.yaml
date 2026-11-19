@@ -37,9 +37,9 @@ name: E2E — Campaign 141 full loop with real push delivery
     commands:
       - launchApp:
           clearState: true
-          # Name the grants: without `permissions`, Maestro pulls the app's APK
-          # over adb to read its permission list, and on a fresh hosted
-          # emulator that first pull can drop the ADB transport.
+          # The java_layout sample's runtime permissions (customerio-android
+          # samples/java_layout/src/main/AndroidManifest.xml, plus COARSE from the
+          # location module). Naming them stops Maestro pulling the APK over adb.
           permissions:
             android.permission.ACCESS_FINE_LOCATION: allow
             android.permission.ACCESS_COARSE_LOCATION: allow

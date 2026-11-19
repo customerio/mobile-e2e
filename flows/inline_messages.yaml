@@ -18,8 +18,26 @@ name: Inline in-app — render + position template
 - runScript:
     file: ../scripts/setup_run.js
 
-- launchApp:
-    clearState: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
+          # The java_layout sample's runtime permissions (customerio-android
+          # samples/java_layout/src/main/AndroidManifest.xml, plus COARSE from the
+          # location module). Naming them stops Maestro pulling the APK over adb.
+          permissions:
+            android.permission.ACCESS_FINE_LOCATION: allow
+            android.permission.ACCESS_COARSE_LOCATION: allow
+            android.permission.ACCESS_BACKGROUND_LOCATION: allow
+            android.permission.POST_NOTIFICATIONS: allow
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - launchApp:
+          clearState: true
 
 - runFlow:
     file: shared/android_startup_ready.yaml
