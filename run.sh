@@ -224,21 +224,69 @@ if [[ "$PLATFORM" == Android ]]; then
   mkdir -p "$ANDROID_RECORD_DIR"
   find "$ANDROID_RECORD_DIR" -mindepth 1 -delete
   rm -f "$ANDROID_RECORD_STOP"
+  # Segments stay on the device until Maestro exits, so the rollover no longer
+  # pulls a file over the ADB transport Maestro is driving.
+  adb -s "$ANDROID_DEVICE" shell 'rm -f /sdcard/maestro-run-*.mp4' >/dev/null 2>&1 || true
+  # When each segment started and stopped (UTC), to line a rollover up against
+  # the time of a transport drop. A device retry appends to the first attempt's.
+  ANDROID_SEGMENT_LOG="$OUT_DIR/screenrecord-segments.log"
+  [[ "${E2E_RECOVERY_ATTEMPT:-0}" == 1 ]] || : >"$ANDROID_SEGMENT_LOG"
+  android_segment_log() {
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" \
+      >>"$ANDROID_SEGMENT_LOG" 2>/dev/null || true
+  }
   record_android_segments() {
-    local index=0 remote_file local_file serial
+    local index=0 free_kb name rc serial
     while [[ ! -f "$ANDROID_RECORD_STOP" ]]; do
-      remote_file="/sdcard/maestro-run-$index.mp4"
-      local_file="$ANDROID_RECORD_DIR/segment-$(printf '%04d' "$index").mp4"
+      name="maestro-run-$(printf '%04d' "$index").mp4"
+      # A segment is about 3.5 MB in practice and 85 MB at the bit-rate cap.
+      # Stop recording well above Android's low-storage threshold rather than
+      # fill the device the app under test runs on. An offline device answers
+      # nothing; that must not end the recorder.
       serial=$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")
-      adb -s "$serial" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+      free_kb=$(adb -s "$serial" shell df -k /sdcard/ 2>/dev/null |
+        tr -d '\r' | awk 'NR == 2 { print $4 }') || free_kb=""
+      if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 600000 )); then
+        echo "warn: Android screen recording stopped; ${free_kb} KB free on the device"
+        android_segment_log "stopped recording: ${free_kb} KB free"
+        break
+      fi
+      android_segment_log "start $name"
+      rc=0
       adb -s "$serial" shell screenrecord \
-        --size 720x1600 --bit-rate 4000000 --time-limit 170 "$remote_file" \
-        >/dev/null 2>&1 || true
-      # A TCP drop ends screenrecord early; its segment is still on the device.
-      serial=$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")
-      adb -s "$serial" pull "$remote_file" "$local_file" >/dev/null 2>&1 || true
-      adb -s "$serial" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+        --size 720x1600 --bit-rate 4000000 --time-limit 170 "/sdcard/$name" \
+        >/dev/null 2>&1 || rc=$?
+      android_segment_log "stop $name exit=$rc"
+      # A failed start means the device is offline or wedged; pause so the
+      # loop does not hammer a dropped transport with back-to-back adb calls.
+      (( rc == 0 )) || sleep 2
       index=$((index + 1))
+    done
+  }
+  pull_android_segments() {
+    local remote name serial deadline=$((SECONDS + 20))
+    # After a drop the device usually reconnects within seconds; without it
+    # the segments cannot be fetched. Over TCP the emulator serial reaches it.
+    until serial=$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL") &&
+          [[ "$(adb -s "$serial" get-state 2>/dev/null | tr -d '\r')" == device ]]; do
+      if (( SECONDS >= deadline )); then
+        echo "warn: Android device offline; screen recording segments left on the device"
+        android_segment_log "device offline; segments left on the device"
+        return 0
+      fi
+      sleep 1
+    done
+    for remote in $(adb -s "$serial" shell 'ls /sdcard/maestro-run-*.mp4' 2>/dev/null |
+      tr -d '\r' | grep '\.mp4$' | sort); do
+      name="${remote##*/}"
+      # Only a segment that reached the host is deleted from the device.
+      if adb -s "$serial" pull "$remote" \
+        "$ANDROID_RECORD_DIR/segment-${name#maestro-run-}" >/dev/null 2>&1; then
+        android_segment_log "pulled $name"
+        adb -s "$serial" shell rm -f "$remote" >/dev/null 2>&1 || true
+      else
+        android_segment_log "pull failed $name; left on the device"
+      fi
     done
   }
   record_android_segments &
@@ -376,11 +424,19 @@ if [[ "$PLATFORM" == Android ]]; then
     shell pkill -2 screenrecord >/dev/null 2>&1 || true
   wait "$REC_PID" 2>/dev/null || true
   REC_PID=""
+  pull_android_segments
   SEGMENT_LIST="$OUT_DIR/android-segments.txt"
   : >"$SEGMENT_LIST"
   SEGMENT_COUNT=0
   for segment in "$ANDROID_RECORD_DIR"/segment-*.mp4; do
     [[ -f "$segment" ]] || continue
+    # A segment cut off by a transport drop never got its index written, and
+    # one unreadable file fails the whole concat.
+    if command -v ffmpeg >/dev/null 2>&1 &&
+       ! ffmpeg -v error -i "$segment" -c copy -f null - >/dev/null 2>&1; then
+      echo "warn: skipping unreadable Android recording segment ${segment##*/}"
+      continue
+    fi
     printf "file '%s'\n" "$segment" >>"$SEGMENT_LIST"
     SEGMENT_COUNT=$((SEGMENT_COUNT + 1))
   done
