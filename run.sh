@@ -28,9 +28,9 @@ mkdir -p "$OUT_DIR" "$DEBUG_DIR"
 find "$DEBUG_DIR" -mindepth 1 -delete
 mkdir -p "$TEST_OUTPUT_DIR"
 find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
-# Never leave a previous run's video looking like evidence for the current run
-# when capture or annotated rendering fails partway through.
-rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
+# Never leave a previous run's video or log looking like evidence for the
+# current run when capture or annotated rendering fails partway through.
+rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4" "$OUT_DIR/run.log"
 # Recovery bundles describe the previous attempt of the current top-level run.
 # The recovery wrappers re-enter this script with the same artifact directory;
 # retain the bundle they just captured during that nested invocation.
@@ -252,6 +252,13 @@ fi
 # runner; keep the offset in the job log, which outlives uploaded evidence.
 if [[ "$PLATFORM" == Android ]]; then
   python3 "$HARNESS_DIR/scripts/e2e_diagnostics.py" android-clock "$ANDROID_DEVICE" || true
+  # e2e moves ADB to TCP (a host:port serial) unless that failed. Name the
+  # transport each attempt ran on, so a drop can be traced to one of them.
+  ADB_TRANSPORT="emulator pipe"
+  [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
+  printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
+    "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
+    | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}"
 fi
 echo ">> running maestro: $FLOW_PATH"
 MAESTRO_DEVICE_ARGS=()
@@ -308,7 +315,7 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   -e "GEOFENCE_INSIDE_LONGITUDE=${GEOFENCE_INSIDE_LONGITUDE:--74.0060}" \
   -e "GEOFENCE_ID=$RESOLVED_GEOFENCE_ID" \
   -e "GEOFENCE_EXPECTED_PROPERTY=$GEOFENCE_EXPECTED_PROPERTY" \
-  "$FLOW_PATH" | tee "$OUT_DIR/run.log"
+  "$FLOW_PATH" | tee -a "$OUT_DIR/run.log"
 EXIT=$?
 set -e
 

@@ -181,14 +181,42 @@ ADB_LOG="$TEST_DIR/adb-calls.log"
 ADB_REBOOT_FAILS=0
 ADB_REBOOT_OFFLINE_POLLS=2
 ADB_REBOOT_NEVER_GOES_DOWN=0
+# adbd answers on TCP only after `tcpip`, until the next reboot, and only while
+# ADB_TCP_ANSWERS is 1. State lives in files for the same reason as above.
+ADB_TCP_ANSWERS=1
 sleep() { :; }
 adb() {
   local polls
   printf '%s\n' "$*" >>"$ADB_LOG"
   case "$*" in
     "start-server") return 0 ;;
+    "disconnect "*) rm -f "$TEST_DIR/adb-tcp-connected" ;;
+    *" tcpip 5555") : >"$TEST_DIR/adb-tcpip" ;;
+    *" shell getprop service.adb.tcp.port")
+      [[ ! -f "$TEST_DIR/adb-tcpip" ]] || printf '%s\n' 5555
+      ;;
+    *" emu redir add tcp:5600:5555") printf '%s\n' OK ;;
+    "connect 127.0.0.1:5600")
+      if [[ "$ADB_TCP_ANSWERS" -eq 1 && -f "$TEST_DIR/adb-tcpip" ]]; then
+        : >"$TEST_DIR/adb-tcp-connected"
+        printf '%s\n' 'connected to 127.0.0.1:5600'
+      else
+        printf '%s\n' 'failed to connect to 127.0.0.1:5600'
+        return 1
+      fi
+      ;;
+    "-s 127.0.0.1:5600 get-state")
+      [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
+      printf '%s\n' device
+      ;;
+    "-s 127.0.0.1:5600 shell getprop sys.boot_completed")
+      [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
+      printf '%s\n' 1
+      ;;
     *" reboot")
       [[ "$ADB_REBOOT_FAILS" -eq 0 ]] || return 1
+      # A reboot ends adbd's TCP listener and the connection to it.
+      rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected"
       [[ "$ADB_REBOOT_NEVER_GOES_DOWN" -eq 1 ]] ||
         printf '%s' "$ADB_REBOOT_OFFLINE_POLLS" >"$TEST_DIR/adb-offline-polls"
       ;;
@@ -445,7 +473,7 @@ run_pre_identify_recovery() {
   ANDROID_RETRY_RESULT=0
   set +e
   run_android_transport_recovery_once \
-    7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+    7 "$TRANSPORT_ARTIFACTS" "${1:-emulator-5554}" android_retry_command \
     >"$RECOVERY_OUTPUT"
   android_recovery_result=$?
   set -e
@@ -496,5 +524,84 @@ sed -i.bak 's/DeviceServerDiedException/AssertionError/' \
 run_pre_identify_recovery
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+
+# ADB moves onto adbd's TCP listener through the emulator's port redirect.
+reset_adb_tcp() {
+  rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls"
+  : >"$ADB_LOG"
+  NOTES=""
+  ADB_TCP_ANSWERS=1
+  ADB_STATE="device"
+  ADB_BOOTED="1"
+  unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
+}
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$ANDROID_EMULATOR_SERIAL" == "emulator-5554" ]]
+grep -Fxq -- '-s emulator-5554 tcpip 5555' "$ADB_LOG"
+grep -Fxq -- '-s emulator-5554 emu redir add tcp:5600:5555' "$ADB_LOG"
+grep -Fxq -- 'connect 127.0.0.1:5600' "$ADB_LOG"
+grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
+grep -Fq 'connected to 127.0.0.1:5600' "$TEST_DIR/adb-transport.log"
+# Once adbd listens on TCP, a second switch does not restart it again.
+: >"$ADB_LOG"
+use_android_adb_over_tcp emulator-5554
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+if grep -Fq 'tcpip' "$ADB_LOG"; then
+  echo "expected no adbd restart when it already listens on TCP" >&2
+  exit 1
+fi
+
+# adbd never answering on TCP keeps the emulator pipe, with a warning, and
+# never fails the run.
+reset_adb_tcp
+ADB_TCP_ANSWERS=0
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"; printf 'serial=%s\n' "$ANDROID_ADB_SERIAL")
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS
+grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
+grep -Eq '^::warning::adb transport: emulator pipe \(emulator-5554\); adbd did not answer on 127.0.0.1:5600' <<<"$TCP_OUTPUT"
+[[ "$(tail -n 1 "$ADB_LOG")" == "disconnect 127.0.0.1:5600" ]]
+
+# The switch can be turned off.
+reset_adb_tcp
+ANDROID_ADB_TCP_PORT=off
+use_android_adb_over_tcp emulator-5554
+unset ANDROID_ADB_TCP_PORT
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" ]]
+[[ ! -s "$ADB_LOG" ]]
+
+# A drop on TCP reboots through the emulator, whose transport survives the
+# reboot, then moves the retry back onto TCP, since the reboot ended adbd's
+# TCP listener.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554
+: >"$ADB_LOG"
+write_pre_identify_fixture
+run_pre_identify_recovery 127.0.0.1:5600
+[[ "$android_recovery_result" -eq 0 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
+grep -Fxq -- '-s emulator-5554 reboot' "$ADB_LOG"
+[[ "$(grep -Fxc -- '-s emulator-5554 tcpip 5555' "$ADB_LOG")" -eq 1 ]]
+[[ "$E2E_DEVICE_ID" == "127.0.0.1:5600" && "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+grep -Fq '== after restart' \
+  "$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-state.txt"
+grep -Fq 'switching emulator-5554 to 127.0.0.1:5600' "$TRANSPORT_ARTIFACTS/adb-transport.log"
+
+# If TCP does not come back after the reboot, the retry runs on the emulator
+# pipe rather than on a serial that no longer answers.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554
+ADB_TCP_ANSWERS=0
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+write_pre_identify_fixture
+run_pre_identify_recovery 127.0.0.1:5600
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS
+[[ "$android_recovery_result" -eq 0 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 1 ]]
+[[ "$E2E_DEVICE_ID" == "emulator-5554" && "$ANDROID_ADB_SERIAL" == "emulator-5554" ]]
+grep -Eq '^::warning::adb transport: emulator pipe' "$RECOVERY_OUTPUT"
+unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
 
 echo "Android device fallback tests passed"

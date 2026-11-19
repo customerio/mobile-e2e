@@ -180,6 +180,69 @@ android_maestro_transport_failed_before_identify() {
   ' "$maestro_log"
 }
 
+# Move ADB off the emulator's adb pipe and onto adbd's own TCP listener, which
+# the emulator redirects from a host port. On hosted runners the pipe's bridge
+# closes the host and guest ends together during load bursts (the host server
+# logs "connection terminated: read failed" while adbd and the emulator keep
+# running), which takes Maestro's driver down mid-flow. Sets ANDROID_ADB_SERIAL
+# to the serial every later command should use, and ANDROID_EMULATOR_SERIAL to
+# the one that console (emu) commands and reboots need. Any failure keeps the
+# emulator serial: the run must never fail because of the switch.
+use_android_adb_over_tcp() {
+  local emulator_serial="$1"
+  local log="${2:-/dev/null}"
+  local host_port="${ANDROID_ADB_TCP_PORT:-5600}"
+  local timeout_seconds="${ANDROID_ADB_TCP_TIMEOUT_SECONDS:-60}"
+  local tcp_serial="127.0.0.1:$host_port" deadline booted tcp_port
+  ANDROID_EMULATOR_SERIAL="$emulator_serial"
+  ANDROID_ADB_SERIAL="$emulator_serial"
+  if [[ "$host_port" == off ]]; then
+    note "adb transport: emulator pipe ($emulator_serial); ANDROID_ADB_TCP_PORT=off"
+    return 0
+  fi
+  if ! [[ "$host_port" =~ ^[1-9][0-9]*$ && "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_PORT or ANDROID_ADB_TCP_TIMEOUT_SECONDS\n' \
+      "$emulator_serial"
+    return 0
+  fi
+  {
+    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
+    # A reboot ends adbd's TCP listener, so a connection kept from before it
+    # would only sit offline.
+    adb disconnect "$tcp_serial" 2>&1 || true
+  } >>"$log" 2>&1
+  deadline=$((SECONDS + timeout_seconds))
+  while true; do
+    {
+      # adbd sets the property, then restarts to listen on TCP, so the
+      # emulator transport drops for a moment. Ask only while adbd answers
+      # without it: asking mid-restart would restart adbd again.
+      if tcp_port=$(adb -s "$emulator_serial" shell getprop service.adb.tcp.port 2>/dev/null) &&
+         [[ "${tcp_port//$'\r'/}" != 5555 ]]; then
+        adb -s "$emulator_serial" tcpip 5555 2>&1 || true
+      fi
+      # Refused while the emulator console starts and once the redirect exists.
+      adb -s "$emulator_serial" emu redir add "tcp:$host_port:5555" 2>&1 || true
+      adb connect "$tcp_serial" 2>&1 || true
+    } >>"$log" 2>&1
+    if [[ "$(adb -s "$tcp_serial" get-state 2>/dev/null || true)" == device ]]; then
+      booted=$(adb -s "$tcp_serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+      if [[ "$booted" == 1 ]]; then
+        ANDROID_ADB_SERIAL="$tcp_serial"
+        note "adb transport: tcp ($tcp_serial, redirected by $emulator_serial)"
+        return 0
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
+        "$emulator_serial" "$tcp_serial" "$timeout_seconds"
+      return 0
+    fi
+    sleep 2
+  done
+}
+
 wait_for_android_device_reconnect() {
   local device_id="$1"
   local timeout_seconds="${ANDROID_DEVICE_RECONNECT_TIMEOUT_SECONDS:-60}"
@@ -292,6 +355,9 @@ run_android_transport_recovery_once() {
   local device_id="$3"
   local recovery_attempt_was_set="${E2E_RECOVERY_ATTEMPT+x}"
   local recovery_attempt_value="${E2E_RECOVERY_ATTEMPT:-}"
+  # A reboot goes through the emulator, whose transport survives it, and ends
+  # adbd's TCP listener, so the switch to TCP runs again afterwards.
+  local emulator_serial="${ANDROID_EMULATOR_SERIAL:-$device_id}"
   shift 3
 
   [[ "$initial_result" -ne 0 ]] || return 0
@@ -302,14 +368,19 @@ run_android_transport_recovery_once() {
   report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
   capture_android_transport_diagnostics "$artifact_dir" "$device_id" "at failure"
-  if ! wait_for_android_device_reconnect "$device_id"; then
+  if ! wait_for_android_device_reconnect "$emulator_serial"; then
     note "Android device did not reconnect; preserving the original Maestro failure"
     return "$initial_result"
   fi
-  if ! restart_android_device_for_retry "$device_id"; then
+  if ! restart_android_device_for_retry "$emulator_serial"; then
     note "Android device did not come back from a restart; preserving the original Maestro failure"
-    capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after failed restart"
+    capture_android_transport_diagnostics "$artifact_dir" "$emulator_serial" "after failed restart"
     return "$initial_result"
+  fi
+  if [[ "$emulator_serial" != "$device_id" ]]; then
+    use_android_adb_over_tcp "$emulator_serial" "$artifact_dir/adb-transport.log"
+    device_id="$ANDROID_ADB_SERIAL"
+    export E2E_DEVICE_ID="$device_id"
   fi
   capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after restart"
   local retry_result
