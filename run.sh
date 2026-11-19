@@ -218,19 +218,46 @@ if [[ "$PLATFORM" == Android ]]; then
   mkdir -p "$ANDROID_RECORD_DIR"
   find "$ANDROID_RECORD_DIR" -mindepth 1 -delete
   rm -f "$ANDROID_RECORD_STOP"
+  # Segments stay on the device until Maestro exits: a pull at each 170 s
+  # rollover is a bulk transfer over the same ADB transport Maestro drives.
+  adb -s "$ANDROID_DEVICE" shell 'rm -f /sdcard/maestro-run-*.mp4' >/dev/null 2>&1 || true
   record_android_segments() {
-    local index=0 remote_file local_file
+    local index=0 free_kb
     while [[ ! -f "$ANDROID_RECORD_STOP" ]]; do
-      remote_file="/sdcard/maestro-run-$index.mp4"
-      local_file="$ANDROID_RECORD_DIR/segment-$(printf '%04d' "$index").mp4"
-      adb -s "$ANDROID_DEVICE" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+      # A segment is about 3.5 MB in practice and 85 MB at the bit-rate cap.
+      # Stop recording rather than fill the device the app under test runs on.
+      free_kb=$(adb -s "$ANDROID_DEVICE" shell df -k /sdcard/ 2>/dev/null |
+        tr -d '\r' | awk 'NR == 2 { print $4 }')
+      if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < 200000 )); then
+        echo "warn: Android screen recording stopped; ${free_kb} KB free on the device"
+        break
+      fi
+      # A failed start means the device is offline or wedged; pause so the
+      # loop does not hammer a dropped transport with back-to-back adb calls.
       adb -s "$ANDROID_DEVICE" shell screenrecord \
-        --size 720x1600 --bit-rate 4000000 --time-limit 170 "$remote_file" \
-        >/dev/null 2>&1 || true
-      adb -s "$ANDROID_DEVICE" pull "$remote_file" "$local_file" >/dev/null 2>&1 || true
-      adb -s "$ANDROID_DEVICE" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+        --size 720x1600 --bit-rate 4000000 --time-limit 170 \
+        "/sdcard/maestro-run-$(printf '%04d' "$index").mp4" \
+        >/dev/null 2>&1 || sleep 2
       index=$((index + 1))
     done
+  }
+  pull_android_segments() {
+    local remote deadline=$((SECONDS + 20))
+    # After a drop the device usually reconnects within seconds; without it
+    # the segments cannot be fetched.
+    until [[ "$(adb -s "$ANDROID_DEVICE" get-state 2>/dev/null | tr -d '\r')" == device ]]; do
+      if (( SECONDS >= deadline )); then
+        echo "warn: Android device offline; screen recording segments left on the device"
+        return 0
+      fi
+      sleep 1
+    done
+    for remote in $(adb -s "$ANDROID_DEVICE" shell 'ls /sdcard/maestro-run-*.mp4' 2>/dev/null |
+      tr -d '\r' | grep '\.mp4$' | sort); do
+      adb -s "$ANDROID_DEVICE" pull "$remote" \
+        "$ANDROID_RECORD_DIR/segment-${remote##*/maestro-run-}" >/dev/null 2>&1 || true
+    done
+    adb -s "$ANDROID_DEVICE" shell 'rm -f /sdcard/maestro-run-*.mp4' >/dev/null 2>&1 || true
   }
   record_android_segments &
   REC_PID=$!
@@ -359,11 +386,19 @@ if [[ "$PLATFORM" == Android ]]; then
   adb -s "$ANDROID_DEVICE" shell pkill -2 screenrecord >/dev/null 2>&1 || true
   wait "$REC_PID" 2>/dev/null || true
   REC_PID=""
+  pull_android_segments
   SEGMENT_LIST="$OUT_DIR/android-segments.txt"
   : >"$SEGMENT_LIST"
   SEGMENT_COUNT=0
   for segment in "$ANDROID_RECORD_DIR"/segment-*.mp4; do
     [[ -f "$segment" ]] || continue
+    # A segment cut off by a transport drop never got its index written, and
+    # one unreadable file fails the whole concat.
+    if command -v ffmpeg >/dev/null 2>&1 &&
+       ! ffmpeg -v error -i "$segment" -c copy -f null - >/dev/null 2>&1; then
+      echo "warn: skipping unreadable Android recording segment ${segment##*/}"
+      continue
+    fi
     printf "file '%s'\n" "$segment" >>"$SEGMENT_LIST"
     SEGMENT_COUNT=$((SEGMENT_COUNT + 1))
   done
