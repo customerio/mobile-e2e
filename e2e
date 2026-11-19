@@ -426,8 +426,12 @@ doctor() {
     || die "Maestro CLI 2.6.0 or newer is required (found $maestro_version)"
   require_command curl
   require_command python3
-  if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "warn: ffmpeg is not installed; the device recording stays as raw segments or frames, and annotated video rendering will be skipped" >&2
+  # iOS records thousands of 5fps PNG frames that only ffmpeg turns into a
+  # video, so it stays required there. Android keeps adb's raw MP4 segments.
+  if [[ "$PLATFORM" == "ios" ]]; then
+    require_command ffmpeg
+  elif ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "warn: ffmpeg is not installed; the device recording stays as raw segments, and annotated video rendering will be skipped" >&2
   fi
   if ! python3 -c 'from PIL import Image' >/dev/null 2>&1; then
     echo "warn: Python Pillow is not installed; annotated video rendering will be skipped" >&2
