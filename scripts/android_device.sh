@@ -272,8 +272,9 @@ use_android_adb_over_tcp() {
     return 0
   fi
   tcp_serial="127.0.0.1:$host_port"
-  # The whole switch, every adb call included, ends within the budget plus a
-  # few seconds.
+  # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
+  # so one pass that starts just before it can end about 30 s past the budget
+  # at worst.
   deadline=$((SECONDS + timeout_seconds))
   {
     printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"

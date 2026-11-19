@@ -267,7 +267,7 @@ if [[ "$PLATFORM" == Android ]]; then
   [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
   printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
     "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
-    | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
 fi
 echo ">> running maestro: $FLOW_PATH"
 MAESTRO_DEVICE_ARGS=()
