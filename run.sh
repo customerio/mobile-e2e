@@ -355,6 +355,7 @@ if [[ "$PLATFORM" == Android ]]; then
     shell pkill -2 screenrecord >/dev/null 2>&1 || true
   wait "$REC_PID" 2>/dev/null || true
   REC_PID=""
+  rm -f "$ANDROID_RECORD_STOP"
   SEGMENT_LIST="$OUT_DIR/android-segments.txt"
   : >"$SEGMENT_LIST"
   SEGMENT_COUNT=0
@@ -363,16 +364,18 @@ if [[ "$PLATFORM" == Android ]]; then
     printf "file '%s'\n" "$segment" >>"$SEGMENT_LIST"
     SEGMENT_COUNT=$((SEGMENT_COUNT + 1))
   done
-  if [[ "$SEGMENT_COUNT" -gt 0 ]]; then
+  if [[ "$SEGMENT_COUNT" -eq 0 ]]; then
+    echo "warn: Android screen recording produced no segments"
+  elif ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "warn: ffmpeg is not installed; raw segments kept in $ANDROID_RECORD_DIR"
+  else
     ffmpeg -y -f concat -safe 0 -i "$SEGMENT_LIST" -c copy "$OUT_DIR/device.mp4" \
       >/dev/null 2>&1 || echo "warn: Android recording assembly failed"
-  else
-    echo "warn: Android screen recording produced no segments"
   fi
+  rm -f "$SEGMENT_LIST"
   if [[ -f "$OUT_DIR/device.mp4" ]]; then
     find "$ANDROID_RECORD_DIR" -mindepth 1 -delete
     rmdir "$ANDROID_RECORD_DIR"
-    rm -f "$SEGMENT_LIST" "$ANDROID_RECORD_STOP"
   fi
 else
   kill "$REC_PID" >/dev/null 2>&1 || true
@@ -432,6 +435,8 @@ if [[ -f "$OUT_DIR/device.mp4" ]]; then
   else
     echo "warn: annotated video render skipped; no Maestro commands JSON found"
   fi
+else
+  echo "warn: annotated video render skipped; no device.mp4"
 fi
 
 python3 "$HARNESS_DIR/scripts/redact_artifacts.py" "$OUT_DIR"
