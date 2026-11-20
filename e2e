@@ -82,6 +82,7 @@ SKIP_DOCTOR=0
 STARTED_DEVICE=0
 DEVICE_ID=""
 ANDROID_SERIAL=""
+ANDROID_EMULATOR_SERIAL=""
 ARTIFACT_DIR=""
 
 usage() {
@@ -101,6 +102,7 @@ usage() {
   printf '  LIVE_NOTIFICATION_DEEP_LINK, MAESTRO_INBOX_API_BASE_URL, MAESTRO_SITE_ID,\n'
   printf '  MAESTRO_INBOX_DATACENTER, MAESTRO_INBOX_CLIENT_PLATFORM,\n'
   printf '  INBOX_TRANSACTIONAL_MESSAGE_ID, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
+  printf '  ANDROID_ADB_TCP_PORT (host port for adb over TCP: 5600 in CI or --headless, else off; off keeps the emulator pipe),\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to the seeded fence: 83 on Android, 3488 on iOS)\n'
 }
@@ -558,11 +560,14 @@ start_ios_device() {
 }
 
 cleanup_device() {
+  if [[ "$ANDROID_SERIAL" == *:* ]]; then
+    adb disconnect "$ANDROID_SERIAL" >/dev/null 2>&1 || true
+  fi
   if [[ "$STARTED_DEVICE" == 0 || "$KEEP_DEVICE" == 1 ]]; then
     return
   fi
   if [[ "$PLATFORM" == "android" && -n "$ANDROID_SERIAL" ]]; then
-    adb -s "$ANDROID_SERIAL" emu kill >/dev/null 2>&1 || true
+    adb -s "${ANDROID_EMULATOR_SERIAL:-$ANDROID_SERIAL}" emu kill >/dev/null 2>&1 || true
   elif [[ "$PLATFORM" == "ios" && -n "$DEVICE_ID" ]]; then
     xcrun simctl shutdown "$DEVICE_ID" >/dev/null 2>&1 || true
   fi
@@ -681,7 +686,7 @@ collect_device_logs() {
   if [[ "$PLATFORM" == "android" ]]; then
     # The Android SDK logs every module, geofence included, under the logcat
     # tag "[CIO]" (core LoggerImpl.TAG).
-    adb -s "$ANDROID_SERIAL" logcat -d \
+    adb -s "$(android_evidence_serial "$ANDROID_SERIAL" "$ANDROID_EMULATOR_SERIAL")" logcat -d \
       'CustomerIO:V' '[CIO]:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
       >"$ARTIFACT_DIR/device.log" 2>&1 || true
   else
@@ -702,6 +707,11 @@ run_e2e() {
   fi
   if [[ "$PLATFORM" == "android" ]]; then
     start_android_device
+    use_android_adb_over_tcp "$ANDROID_SERIAL" "$ARTIFACT_DIR/adb-transport.log"
+    ANDROID_SERIAL="$ANDROID_ADB_SERIAL"
+    DEVICE_ID="$ANDROID_SERIAL"
+    # run.sh pulls its evidence through the emulator serial if TCP drops.
+    export E2E_ANDROID_EMULATOR_SERIAL="$ANDROID_EMULATOR_SERIAL"
     build_and_install_android
     adb -s "$ANDROID_SERIAL" logcat -c || true
     runner_platform="Android"
@@ -730,6 +740,9 @@ run_e2e() {
       run_sample_maestro "$runner_platform"
     result=$?
     set -e
+    # The recovery reboot re-runs the TCP switch, which may land on either serial.
+    ANDROID_SERIAL="$ANDROID_ADB_SERIAL"
+    DEVICE_ID="$ANDROID_SERIAL"
   elif [[ "$result" -ne 0 && "$PLATFORM" == "ios" ]]; then
     set +e
     run_ios_driver_recovery_once \

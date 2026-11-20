@@ -28,9 +28,9 @@ mkdir -p "$OUT_DIR" "$DEBUG_DIR"
 find "$DEBUG_DIR" -mindepth 1 -delete
 mkdir -p "$TEST_OUTPUT_DIR"
 find "$TEST_OUTPUT_DIR" -mindepth 1 -delete
-# Never leave a previous run's video looking like evidence for the current run
-# when capture or annotated rendering fails partway through.
-rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4"
+# Never leave a previous run's video or log looking like evidence for the
+# current run when capture or annotated rendering fails partway through.
+rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4" "$OUT_DIR/run.log"
 # Recovery bundles describe the previous attempt of the current top-level run.
 # The recovery wrappers re-enter this script with the same artifact directory;
 # retain the bundle they just captured during that nested invocation.
@@ -125,6 +125,11 @@ elif [[ "$PLATFORM" == Android ]]; then
   if [[ -z "$ANDROID_DEVICE" || "$(adb -s "$ANDROID_DEVICE" get-state 2>/dev/null || true)" != "device" ]]; then
     echo "error: selected Android emulator is not attached" >&2; exit 2
   fi
+  # shellcheck source=scripts/android_device.sh
+  source "$HARNESS_DIR/scripts/android_device.sh"
+  # e2e may run ADB over TCP; if that drops, the emulator serial still reaches
+  # the device for the recording and its stop.
+  ANDROID_EMULATOR_SERIAL="${E2E_ANDROID_EMULATOR_SERIAL:-}"
 else
   echo "error: unknown PLATFORM '$PLATFORM' (expected iOS or Android)" >&2; exit 2
 fi
@@ -151,7 +156,8 @@ DEVICE_LOG_PID=""
 cleanup() {
   if [[ "$PLATFORM" == Android && -n "$ANDROID_DEVICE" ]]; then
     [[ -n "${ANDROID_RECORD_STOP:-}" ]] && : >"$ANDROID_RECORD_STOP"
-    adb -s "$ANDROID_DEVICE" shell pkill -2 screenrecord >/dev/null 2>&1 || true
+    adb -s "$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")" \
+      shell pkill -2 screenrecord >/dev/null 2>&1 || true
   fi
   if [[ -n "$REC_PID" ]]; then
     kill "$REC_PID" >/dev/null 2>&1 || true
@@ -213,16 +219,19 @@ if [[ "$PLATFORM" == Android ]]; then
   find "$ANDROID_RECORD_DIR" -mindepth 1 -delete
   rm -f "$ANDROID_RECORD_STOP"
   record_android_segments() {
-    local index=0 remote_file local_file
+    local index=0 remote_file local_file serial
     while [[ ! -f "$ANDROID_RECORD_STOP" ]]; do
       remote_file="/sdcard/maestro-run-$index.mp4"
       local_file="$ANDROID_RECORD_DIR/segment-$(printf '%04d' "$index").mp4"
-      adb -s "$ANDROID_DEVICE" shell rm -f "$remote_file" >/dev/null 2>&1 || true
-      adb -s "$ANDROID_DEVICE" shell screenrecord \
+      serial=$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")
+      adb -s "$serial" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+      adb -s "$serial" shell screenrecord \
         --size 720x1600 --bit-rate 4000000 --time-limit 170 "$remote_file" \
         >/dev/null 2>&1 || true
-      adb -s "$ANDROID_DEVICE" pull "$remote_file" "$local_file" >/dev/null 2>&1 || true
-      adb -s "$ANDROID_DEVICE" shell rm -f "$remote_file" >/dev/null 2>&1 || true
+      # A TCP drop ends screenrecord early; its segment is still on the device.
+      serial=$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")
+      adb -s "$serial" pull "$remote_file" "$local_file" >/dev/null 2>&1 || true
+      adb -s "$serial" shell rm -f "$remote_file" >/dev/null 2>&1 || true
       index=$((index + 1))
     done
   }
@@ -252,6 +261,13 @@ fi
 # runner; keep the offset in the job log, which outlives uploaded evidence.
 if [[ "$PLATFORM" == Android ]]; then
   python3 "$HARNESS_DIR/scripts/e2e_diagnostics.py" android-clock "$ANDROID_DEVICE" || true
+  # e2e moves ADB to TCP (a host:port serial) unless that failed. Name the
+  # transport each attempt ran on, so a drop can be traced to one of them.
+  ADB_TRANSPORT="emulator pipe"
+  [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
+  printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
+    "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
+    | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
 fi
 echo ">> running maestro: $FLOW_PATH"
 MAESTRO_DEVICE_ARGS=()
@@ -308,7 +324,7 @@ maestro "${MAESTRO_DEVICE_ARGS[@]}" test \
   -e "GEOFENCE_INSIDE_LONGITUDE=${GEOFENCE_INSIDE_LONGITUDE:--74.0060}" \
   -e "GEOFENCE_ID=$RESOLVED_GEOFENCE_ID" \
   -e "GEOFENCE_EXPECTED_PROPERTY=$GEOFENCE_EXPECTED_PROPERTY" \
-  "$FLOW_PATH" | tee "$OUT_DIR/run.log"
+  "$FLOW_PATH" | tee -a "$OUT_DIR/run.log"
 EXIT=$?
 set -e
 
@@ -335,7 +351,8 @@ fi
 # --- Stop capture, assemble device.mp4.
 if [[ "$PLATFORM" == Android ]]; then
   : >"$ANDROID_RECORD_STOP"
-  adb -s "$ANDROID_DEVICE" shell pkill -2 screenrecord >/dev/null 2>&1 || true
+  adb -s "$(android_evidence_serial "$ANDROID_DEVICE" "$ANDROID_EMULATOR_SERIAL")" \
+    shell pkill -2 screenrecord >/dev/null 2>&1 || true
   wait "$REC_PID" 2>/dev/null || true
   REC_PID=""
   SEGMENT_LIST="$OUT_DIR/android-segments.txt"

@@ -141,7 +141,7 @@ android_maestro_transport_failed_at_launch() {
   local artifact_dir="$1"
   local maestro_log="$artifact_dir/debug/maestro.log"
   [[ -f "$maestro_log" ]] || return 1
-  grep -E -q 'device offline|DeviceServerDiedException' "$maestro_log" || return 1
+  grep -E -q "device offline|DeviceServerDiedException|device '[^']*' not found" "$maestro_log" || return 1
   awk '
     !launch_started && /onCommandStart:/ {
       if (/onCommandStart: Launch app/) launch_started = 1
@@ -170,7 +170,7 @@ android_maestro_transport_failed_before_identify() {
   local live_log="$artifact_dir/device-live.log"
   local email
   [[ -f "$maestro_log" && -f "$sink_log" && -f "$live_log" ]] || return 1
-  grep -E -q 'device offline|DeviceServerDiedException' "$maestro_log" || return 1
+  grep -E -q "device offline|DeviceServerDiedException|device '[^']*' not found" "$maestro_log" || return 1
   email=$(grep -o '"email": "[^"]*"' "$sink_log" | tail -n 1 | cut -d'"' -f4)
   [[ -n "$email" ]] || return 1
   ! grep -F -q "$email" "$live_log" || return 1
@@ -178,6 +178,191 @@ android_maestro_transport_failed_before_identify() {
     /onCommandStart: Run .*\.js/ && $0 !~ /(setup_run|wait)\.js/ { unsafe = 1 }
     END { exit unsafe }
   ' "$maestro_log"
+}
+
+# Run one command, cutting it off once $SECONDS passes the deadline (an
+# absolute $SECONDS value). A wedged ADB transport can leave adb waiting on the
+# device forever. Every command gets at least 2 seconds, so a call made right at
+# the deadline can still answer. Returns the command's status, or 124 when it
+# was cut off.
+android_run_until() {
+  local deadline="$1" pid
+  shift
+  (( deadline >= SECONDS + 2 )) || deadline=$((SECONDS + 2))
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( SECONDS > deadline )); then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    # `command` skips a shell function named sleep, so a stubbed sleep cannot
+    # turn this poll into a busy loop.
+    command sleep 0.1
+  done
+  wait "$pid"
+}
+
+# The serial evidence commands (log pulls, recording pulls, stopping the
+# recorder) should use: the TCP serial while it answers, else the emulator
+# serial, whose transport stays up when TCP drops. That keeps the evidence of a
+# TCP drop reachable. With no separate emulator serial, the preferred one.
+android_evidence_serial() {
+  local preferred="$1"
+  local emulator_serial="${2:-}"
+  if [[ -z "$emulator_serial" || "$preferred" == "$emulator_serial" ]]; then
+    printf '%s\n' "$preferred"
+  elif [[ "$(android_run_until $((SECONDS + 10)) adb -s "$preferred" get-state 2>/dev/null)" == device ]]; then
+    printf '%s\n' "$preferred"
+  else
+    printf '%s\n' "$emulator_serial"
+  fi
+}
+
+# Whether adbd in the guest already listens on TCP port 5555 (0x15B3), from
+# /proc/net. adbd listens there by default when it has no USB function, which
+# would make `adb tcpip` and the adbd restart it causes unnecessary. A failed
+# read counts as not listening, which keeps the `adb tcpip` path.
+android_adbd_listens_on_tcp() {
+  local serial="$1"
+  local deadline="$2"
+  local tables
+  tables=$(android_run_until "$deadline" adb -s "$serial" shell cat /proc/net/tcp /proc/net/tcp6 2>/dev/null) || true
+  grep -Eq '^ *[0-9]+: [0-9A-F]+:15B3 [0-9A-F]+:0000 0A ' <<<"$tables"
+}
+
+android_boot_id() {
+  android_run_until "$2" adb -s "$1" shell cat /proc/sys/kernel/random/boot_id 2>/dev/null |
+    tr -d '\r' || true
+}
+
+# Move ADB off the emulator's adb pipe and onto adbd's own TCP listener, which
+# the emulator redirects from a host port. On hosted runners the pipe's bridge
+# closes the host and guest ends together during load bursts (the host server
+# logs "connection terminated: read failed" while adbd and the emulator keep
+# running), which takes Maestro's driver down mid-flow. Sets ANDROID_ADB_SERIAL
+# to the serial every later command should use, and ANDROID_EMULATOR_SERIAL to
+# the one that console (emu) commands, reboots and guest diagnostics need. On by
+# default only in CI and headless runs (CI or HEADLESS=1); ANDROID_ADB_TCP_PORT
+# picks the host port, or turns it on or off anywhere. Any failure keeps the
+# emulator serial: the run must never fail because of the switch.
+use_android_adb_over_tcp() {
+  local emulator_serial="$1"
+  local log="${2:-/dev/null}"
+  local host_port="${ANDROID_ADB_TCP_PORT:-}"
+  local timeout_seconds="${ANDROID_ADB_TCP_TIMEOUT_SECONDS:-60}"
+  local reconnect_seconds="${ANDROID_ADB_TCP_RECONNECT_SECONDS:-12}"
+  local tcp_serial deadline started booted tcp_port emulator_boot tcp_boot redir
+  local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
+  ANDROID_EMULATOR_SERIAL="$emulator_serial"
+  ANDROID_ADB_SERIAL="$emulator_serial"
+  if [[ -z "$host_port" ]]; then
+    if [[ -z "${CI:-}" && "${HEADLESS:-0}" != 1 ]]; then
+      note "adb transport: emulator pipe ($emulator_serial); TCP is the default only in CI or --headless (set ANDROID_ADB_TCP_PORT to use it)"
+      return 0
+    fi
+    host_port=5600
+  fi
+  if [[ "$host_port" == off ]]; then
+    note "adb transport: emulator pipe ($emulator_serial); ANDROID_ADB_TCP_PORT=off"
+    return 0
+  fi
+  # 5554-5585 are the emulators' own console/adb ports: a redirect there fails, and
+  # connecting to it reaches adbd through the pipe while reporting "tcp".
+  if ! [[ "$host_port" =~ ^[1-9][0-9]*$ && "$timeout_seconds" =~ ^[1-9][0-9]*$ &&
+          "$reconnect_seconds" =~ ^[0-9]+$ ]] ||
+     (( host_port > 65535 || (host_port >= 5554 && host_port <= 5585) )); then
+    printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_PORT, ANDROID_ADB_TCP_TIMEOUT_SECONDS or ANDROID_ADB_TCP_RECONNECT_SECONDS\n' \
+      "$emulator_serial"
+    return 0
+  fi
+  tcp_serial="127.0.0.1:$host_port"
+  # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
+  # so one pass that starts just before it can end about 30 s past the budget
+  # at worst.
+  started=$SECONDS
+  deadline=$((SECONDS + timeout_seconds))
+  {
+    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
+    # A reboot ends adbd's TCP listener, so a connection kept from before it
+    # would only sit offline.
+    android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
+  } >>"$log" 2>&1
+  while true; do
+    pass=$((pass + 1))
+    {
+      # adbd sets the property, then restarts to listen on TCP, so the
+      # emulator transport drops for a moment. Ask only while adbd answers
+      # without it: asking mid-restart would restart adbd again. Skip it when
+      # adbd already listens on TCP.
+      if (( ! adbd_on_tcp )) &&
+         tcp_port=$(android_run_until "$deadline" adb -s "$emulator_serial" shell getprop service.adb.tcp.port 2>/dev/null) &&
+         [[ "${tcp_port//$'\r'/}" != 5555 ]]; then
+        if android_adbd_listens_on_tcp "$emulator_serial" "$deadline"; then
+          printf 'adbd already listens on tcp:5555; no adb tcpip\n'
+          adbd_on_tcp=1
+        else
+          android_run_until "$deadline" adb -s "$emulator_serial" tcpip 5555 2>&1 || true
+        fi
+      fi
+      # Refused while the emulator console starts. The redirect lives in the
+      # emulator, so it outlasts adb connections and guest reboots, and a
+      # second add only answers "host port already active".
+      if (( ! redirected )); then
+        redir=$(android_run_until "$deadline" adb -s "$emulator_serial" emu redir add "tcp:$host_port:5555" 2>&1) || true
+        printf '%s\n' "$redir"
+        if [[ "$redir" == OK* || "$redir" == *'already active'* ]]; then
+          redirected=1
+        fi
+      fi
+      # With no transport under the serial (the first pass, or a connect
+      # refused before the redirect existed) a connect dials.
+      if [[ -z "$connected_at" || "$state" == *'not found'* ]]; then
+        connected_at=$SECONDS
+        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+      elif [[ "$state" != device ]] && (( SECONDS - connected_at >= reconnect_seconds )); then
+        # `adb connect` registers the serial before adbd answers and keeps it
+        # registered, offline, after its own 10 s wait gives up; a later
+        # connect then fails register_socket_transport with EALREADY,
+        # "already connected", and never dials again. Drop it and redial.
+        printf 'reconnecting: %s still not a device %ss after connect\n' "$tcp_serial" $((SECONDS - connected_at))
+        android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
+        android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
+        connected_at=$SECONDS
+        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+      fi
+    } >>"$log" 2>&1
+    state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
+    printf 'pass %s +%ss: %s\n' "$pass" $((SECONDS - started)) "${state:-no answer}" >>"$log" 2>/dev/null || true
+    if [[ "$state" == device ]]; then
+      booted=$(android_run_until "$deadline" adb -s "$tcp_serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+      if [[ "$booted" == 1 ]]; then
+        # Another emulator or a stale redirect could answer on the port; use
+        # it only if it is this boot of this emulator.
+        emulator_boot=$(android_boot_id "$emulator_serial" "$deadline")
+        tcp_boot=$(android_boot_id "$tcp_serial" "$deadline")
+        if [[ -n "$emulator_boot" && "$emulator_boot" == "$tcp_boot" ]]; then
+          ANDROID_ADB_SERIAL="$tcp_serial"
+          printf 'boot_id %s on both serials\n' "$tcp_boot" >>"$log"
+          note "adb transport: tcp ($tcp_serial, redirected by $emulator_serial)"
+          return 0
+        elif [[ -n "$emulator_boot" && -n "$tcp_boot" ]]; then
+          android_run_until "$deadline" adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+          printf '::warning::adb transport: emulator pipe (%s); %s is another device (boot_id %s, not %s)\n' \
+            "$emulator_serial" "$tcp_serial" "$tcp_boot" "$emulator_boot"
+          return 0
+        fi
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
+        "$emulator_serial" "$tcp_serial" "$timeout_seconds"
+      return 0
+    fi
+    sleep 2
+  done
 }
 
 wait_for_android_device_reconnect() {
@@ -201,26 +386,33 @@ wait_for_android_device_reconnect() {
 # Record what ADB and the device report at the moment of failure, before any
 # recovery action changes it. The failed runs carry almost no device log
 # (logcat dies with the transport), so uptime is the one reading that tells a
-# system restart apart from a transport-only drop. Every query here fails fast
-# on an offline device, and none of them can fail the recovery.
+# system restart apart from a transport-only drop. The guest is asked through
+# the emulator serial, whose transport stays up when TCP drops, and the state of
+# the serial the run used is recorded beside it. Every query here fails fast on
+# an offline device, and none of them can fail the recovery.
 capture_android_transport_diagnostics() {
   local artifact_dir="$1"
   local device_id="$2"
   local label="${3:-at failure}"
+  local guest="${ANDROID_EMULATOR_SERIAL:-$device_id}"
   local out="$artifact_dir/device-recovery-attempt-1/adb-state.txt"
   mkdir -p "$artifact_dir/device-recovery-attempt-1"
   {
     printf '== %s (%s)\n' "$label" "$(date -u +%H:%M:%S)"
     printf -- '-- adb devices -l\n'
     adb devices -l 2>&1 || true
-    printf -- '-- get-state\n'
+    printf -- '-- get-state %s\n' "$device_id"
     adb -s "$device_id" get-state 2>&1 || true
-    printf -- '-- sys.boot_completed\n'
-    adb -s "$device_id" shell getprop sys.boot_completed 2>&1 || true
+    if [[ "$guest" != "$device_id" ]]; then
+      printf -- '-- get-state %s\n' "$guest"
+      adb -s "$guest" get-state 2>&1 || true
+    fi
+    printf -- '-- sys.boot_completed (%s)\n' "$guest"
+    adb -s "$guest" shell getprop sys.boot_completed 2>&1 || true
     printf -- '-- /proc/uptime\n'
-    adb -s "$device_id" shell cat /proc/uptime 2>&1 || true
+    adb -s "$guest" shell cat /proc/uptime 2>&1 || true
     printf -- '-- logcat crash buffer\n'
-    adb -s "$device_id" logcat -d -b crash -t 80 2>&1 || true
+    adb -s "$guest" logcat -d -b crash -t 80 2>&1 || true
   } >>"$out" 2>&1
 }
 
@@ -292,6 +484,9 @@ run_android_transport_recovery_once() {
   local device_id="$3"
   local recovery_attempt_was_set="${E2E_RECOVERY_ATTEMPT+x}"
   local recovery_attempt_value="${E2E_RECOVERY_ATTEMPT:-}"
+  # A reboot goes through the emulator, whose transport survives it, and ends
+  # adbd's TCP listener, so the switch to TCP runs again afterwards.
+  local emulator_serial="${ANDROID_EMULATOR_SERIAL:-$device_id}"
   shift 3
 
   [[ "$initial_result" -ne 0 ]] || return 0
@@ -302,14 +497,19 @@ run_android_transport_recovery_once() {
   report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
   capture_android_transport_diagnostics "$artifact_dir" "$device_id" "at failure"
-  if ! wait_for_android_device_reconnect "$device_id"; then
+  if ! wait_for_android_device_reconnect "$emulator_serial"; then
     note "Android device did not reconnect; preserving the original Maestro failure"
     return "$initial_result"
   fi
-  if ! restart_android_device_for_retry "$device_id"; then
+  if ! restart_android_device_for_retry "$emulator_serial"; then
     note "Android device did not come back from a restart; preserving the original Maestro failure"
-    capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after failed restart"
+    capture_android_transport_diagnostics "$artifact_dir" "$emulator_serial" "after failed restart"
     return "$initial_result"
+  fi
+  if [[ "$emulator_serial" != "$device_id" ]]; then
+    use_android_adb_over_tcp "$emulator_serial" "$artifact_dir/adb-transport.log"
+    device_id="$ANDROID_ADB_SERIAL"
+    export E2E_DEVICE_ID="$device_id"
   fi
   capture_android_transport_diagnostics "$artifact_dir" "$device_id" "after restart"
   local retry_result
