@@ -141,7 +141,7 @@ android_maestro_transport_failed_at_launch() {
   local artifact_dir="$1"
   local maestro_log="$artifact_dir/debug/maestro.log"
   [[ -f "$maestro_log" ]] || return 1
-  grep -E -q "device offline|DeviceServerDiedException|device '[^']*' not found" "$maestro_log" || return 1
+  android_maestro_log_has_transport_drop "$artifact_dir" || return 1
   awk '
     !launch_started && /onCommandStart:/ {
       if (/onCommandStart: Launch app/) launch_started = 1
@@ -170,7 +170,7 @@ android_maestro_transport_failed_before_identify() {
   local live_log="$artifact_dir/device-live.log"
   local email
   [[ -f "$maestro_log" && -f "$sink_log" && -f "$live_log" ]] || return 1
-  grep -E -q "device offline|DeviceServerDiedException|device '[^']*' not found" "$maestro_log" || return 1
+  android_maestro_log_has_transport_drop "$artifact_dir" || return 1
   email=$(grep -o '"email": "[^"]*"' "$sink_log" | tail -n 1 | cut -d'"' -f4)
   [[ -n "$email" ]] || return 1
   ! grep -F -q "$email" "$live_log" || return 1
@@ -383,37 +383,98 @@ wait_for_android_device_reconnect() {
   return 1
 }
 
-# Record what ADB and the device report at the moment of failure, before any
-# recovery action changes it. The failed runs carry almost no device log
-# (logcat dies with the transport), so uptime is the one reading that tells a
-# system restart apart from a transport-only drop. The guest is asked through
-# the emulator serial, whose transport stays up when TCP drops, and the state of
-# the serial the run used is recorded beside it. Every query here fails fast on
-# an offline device, and none of them can fail the recovery.
+# Maestro's own words for the ADB transport going away under it: the device
+# reported offline, then missing, and the driver dying with it.
+android_maestro_log_has_transport_drop() {
+  local maestro_log="$1/debug/maestro.log"
+  [[ -f "$maestro_log" ]] || return 1
+  grep -E -q "device offline|DeviceServerDiedException|device '[^']*' not found" "$maestro_log"
+}
+
+# One diagnostic query, cut off after N seconds (ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS
+# overrides N) with the cut-off noted in its output. It never fails: a
+# diagnostic must not hold the job up or change its result.
+android_diagnostic() {
+  local seconds="${ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS:-$1}"
+  shift
+  android_run_until $((SECONDS + seconds)) "$@" && return 0
+  (( $? != 124 )) || printf '(gave up after %ss)\n' "$seconds"
+  return 0
+}
+
+# The host ADB server writes its log to its own stderr, so /proc names the file
+# it really uses. adb itself defaults to $TMPDIR/adb.<uid>.log when /proc is not
+# available (macOS).
+android_adb_server_log_path() {
+  local pid path
+  for pid in $(pgrep -f 'adb.*fork-server' 2>/dev/null || true); do
+    path=$(readlink "/proc/$pid/fd/2" 2>/dev/null || true)
+    if [[ -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  for path in "${ANDROID_ADB_LOG_PATH:-}" "${TMPDIR:-/tmp}/adb.$(id -u).log" "/tmp/adb.$(id -u).log"; do
+    if [[ -n "$path" && -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Record what ADB and the device report after the failed run, once Maestro has
+# exited (not at the instant of the drop), and before any recovery action
+# changes it. The failed runs carry almost no device log (logcat dies with the
+# transport), so uptime is the one reading that tells a system restart apart
+# from a transport-only drop, adbd's elapsed time tells a guest adbd restart
+# apart, and the host ADB server log names the side that closed the connection.
+# The guest is asked through the emulator serial, whose transport stays up when
+# TCP drops, and the state of the serial the run used is recorded beside it.
+# Every query is time-boxed (a wedged transport can leave adb waiting on the
+# device), and none of them can fail the recovery or change the job's result.
 capture_android_transport_diagnostics() {
   local artifact_dir="$1"
   local device_id="$2"
   local label="${3:-at failure}"
   local guest="${ANDROID_EMULATOR_SERIAL:-$device_id}"
-  local out="$artifact_dir/device-recovery-attempt-1/adb-state.txt"
-  mkdir -p "$artifact_dir/device-recovery-attempt-1"
+  local out_dir="${4:-$artifact_dir/device-recovery-attempt-1}"
+  local out="$out_dir/adb-state.txt"
+  local adb_log
+  mkdir -p "$out_dir"
   {
     printf '== %s (%s)\n' "$label" "$(date -u +%H:%M:%S)"
     printf -- '-- adb devices -l\n'
-    adb devices -l 2>&1 || true
+    android_diagnostic 10 adb devices -l 2>&1
     printf -- '-- get-state %s\n' "$device_id"
-    adb -s "$device_id" get-state 2>&1 || true
+    android_diagnostic 10 adb -s "$device_id" get-state 2>&1
     if [[ "$guest" != "$device_id" ]]; then
       printf -- '-- get-state %s\n' "$guest"
-      adb -s "$guest" get-state 2>&1 || true
+      android_diagnostic 10 adb -s "$guest" get-state 2>&1
     fi
     printf -- '-- sys.boot_completed (%s)\n' "$guest"
-    adb -s "$guest" shell getprop sys.boot_completed 2>&1 || true
+    android_diagnostic 10 adb -s "$guest" shell getprop sys.boot_completed 2>&1
     printf -- '-- /proc/uptime\n'
-    adb -s "$guest" shell cat /proc/uptime 2>&1 || true
+    android_diagnostic 10 adb -s "$guest" shell cat /proc/uptime 2>&1
+    printf -- '-- adbd processes\n'
+    android_diagnostic 10 adb -s "$guest" shell ps -A -o PID,PPID,STIME,ETIME,NAME 2>&1 |
+      awk '!/^ *[0-9]/ || /adbd/'
+    printf -- '-- logcat adbd\n'
+    android_diagnostic 15 adb -s "$guest" logcat -d -s adbd -t 200 2>&1
     printf -- '-- logcat crash buffer\n'
-    adb -s "$guest" logcat -d -b crash -t 80 2>&1 || true
+    android_diagnostic 15 adb -s "$guest" logcat -d -b crash -t 80 2>&1
   } >>"$out" 2>&1
+  if adb_log=$(android_adb_server_log_path); then
+    {
+      printf '== %s (%s) from %s\n' "$label" "$(date -u +%H:%M:%S)" "$adb_log"
+      # The last 2 MiB covers the whole run; a line count could cut off the
+      # drop if the server logged heavily after it.
+      tail -c 2097152 "$adb_log" 2>&1 || true
+    } >>"$out_dir/adb-server.log" 2>&1
+  else
+    printf '== %s: host ADB server log not found\n' "$label" >>"$out_dir/adb-server.log"
+  fi
+  return 0
 }
 
 # The first attempt's Maestro driver died on an emulator that was still running,
@@ -458,7 +519,7 @@ preserve_android_transport_failure() {
   cp -R "$artifact_dir/debug" "$retry_dir/debug"
   for diagnostic in \
     run.log report.xml report.html sink.stderr sink.jsonl \
-    sdk-live.log device-live.log; do
+    sdk-live.log device-live.log host-vmstat.log; do
     if [[ -f "$artifact_dir/$diagnostic" ]]; then
       cp "$artifact_dir/$diagnostic" "$retry_dir/$diagnostic"
     fi
@@ -478,6 +539,17 @@ report_android_transport_recovery() {
   fi
 }
 
+# A drop the retry does not cover (mid-flow, after identify, or in the retry
+# itself) still gets the transport state recorded, beside the final attempt.
+capture_final_android_transport_drop() {
+  local artifact_dir="$1"
+  local device_id="$2"
+  local label="$3"
+  android_maestro_log_has_transport_drop "$artifact_dir" || return 0
+  capture_android_transport_diagnostics "$artifact_dir" "$device_id" "$label" \
+    "$artifact_dir/device-transport-drop"
+}
+
 run_android_transport_recovery_once() {
   local initial_result="$1"
   local artifact_dir="$2"
@@ -490,9 +562,11 @@ run_android_transport_recovery_once() {
   shift 3
 
   [[ "$initial_result" -ne 0 ]] || return 0
-  android_maestro_transport_failed_at_launch "$artifact_dir" ||
-    android_maestro_transport_failed_before_identify "$artifact_dir" ||
+  if ! android_maestro_transport_failed_at_launch "$artifact_dir" &&
+     ! android_maestro_transport_failed_before_identify "$artifact_dir"; then
+    capture_final_android_transport_drop "$artifact_dir" "$device_id" "at failure, not retried"
     return "$initial_result"
+  fi
   note "Android device went offline before the SDK identified a user; rebooting it and retrying once"
   report_android_transport_recovery "${SUITE:-$(basename "$artifact_dir")}"
   preserve_android_transport_failure "$artifact_dir"
@@ -527,6 +601,7 @@ run_android_transport_recovery_once() {
   else
     printf '\nRetried after an Android device transport failure, but the retry also failed with exit %s. The first attempt is in device-recovery-attempt-1/.\n' \
       "$retry_result" >>"$artifact_dir/run.log"
+    capture_final_android_transport_drop "$artifact_dir" "$device_id" "at retry failure"
   fi
   return "$retry_result"
 }
