@@ -252,7 +252,9 @@ use_android_adb_over_tcp() {
   local log="${2:-/dev/null}"
   local host_port="${ANDROID_ADB_TCP_PORT:-}"
   local timeout_seconds="${ANDROID_ADB_TCP_TIMEOUT_SECONDS:-60}"
-  local tcp_serial deadline booted tcp_port emulator_boot tcp_boot
+  local reconnect_seconds="${ANDROID_ADB_TCP_RECONNECT_SECONDS:-12}"
+  local tcp_serial deadline started booted tcp_port emulator_boot tcp_boot redir
+  local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
   ANDROID_EMULATOR_SERIAL="$emulator_serial"
   ANDROID_ADB_SERIAL="$emulator_serial"
   if [[ -z "$host_port" ]]; then
@@ -266,8 +268,9 @@ use_android_adb_over_tcp() {
     note "adb transport: emulator pipe ($emulator_serial); ANDROID_ADB_TCP_PORT=off"
     return 0
   fi
-  if ! [[ "$host_port" =~ ^[1-9][0-9]*$ && "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-    printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_PORT or ANDROID_ADB_TCP_TIMEOUT_SECONDS\n' \
+  if ! [[ "$host_port" =~ ^[1-9][0-9]*$ && "$timeout_seconds" =~ ^[1-9][0-9]*$ &&
+          "$reconnect_seconds" =~ ^[0-9]+$ ]]; then
+    printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_PORT, ANDROID_ADB_TCP_TIMEOUT_SECONDS or ANDROID_ADB_TCP_RECONNECT_SECONDS\n' \
       "$emulator_serial"
     return 0
   fi
@@ -275,6 +278,7 @@ use_android_adb_over_tcp() {
   # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
   # so one pass that starts just before it can end about 30 s past the budget
   # at worst.
+  started=$SECONDS
   deadline=$((SECONDS + timeout_seconds))
   {
     printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
@@ -283,24 +287,52 @@ use_android_adb_over_tcp() {
     android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
   } >>"$log" 2>&1
   while true; do
+    pass=$((pass + 1))
     {
       # adbd sets the property, then restarts to listen on TCP, so the
       # emulator transport drops for a moment. Ask only while adbd answers
       # without it: asking mid-restart would restart adbd again. Skip it when
       # adbd already listens on TCP.
-      if tcp_port=$(android_run_until "$deadline" adb -s "$emulator_serial" shell getprop service.adb.tcp.port 2>/dev/null) &&
+      if (( ! adbd_on_tcp )) &&
+         tcp_port=$(android_run_until "$deadline" adb -s "$emulator_serial" shell getprop service.adb.tcp.port 2>/dev/null) &&
          [[ "${tcp_port//$'\r'/}" != 5555 ]]; then
         if android_adbd_listens_on_tcp "$emulator_serial" "$deadline"; then
           printf 'adbd already listens on tcp:5555; no adb tcpip\n'
+          adbd_on_tcp=1
         else
           android_run_until "$deadline" adb -s "$emulator_serial" tcpip 5555 2>&1 || true
         fi
       fi
-      # Refused while the emulator console starts and once the redirect exists.
-      android_run_until "$deadline" adb -s "$emulator_serial" emu redir add "tcp:$host_port:5555" 2>&1 || true
-      android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+      # Refused while the emulator console starts. The redirect lives in the
+      # emulator, so it outlasts adb connections and guest reboots, and a
+      # second add only answers "host port already active".
+      if (( ! redirected )); then
+        redir=$(android_run_until "$deadline" adb -s "$emulator_serial" emu redir add "tcp:$host_port:5555" 2>&1) || true
+        printf '%s\n' "$redir"
+        if [[ "$redir" == OK* || "$redir" == *'already active'* ]]; then
+          redirected=1
+        fi
+      fi
+      # With no transport under the serial (the first pass, or a connect
+      # refused before the redirect existed) a connect dials.
+      if [[ -z "$connected_at" || "$state" == *'not found'* ]]; then
+        connected_at=$SECONDS
+        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+      elif [[ "$state" != device ]] && (( SECONDS - connected_at >= reconnect_seconds )); then
+        # `adb connect` registers the serial before adbd answers and keeps it
+        # registered, offline, after its own 10 s wait gives up; a later
+        # connect then fails register_socket_transport with EALREADY,
+        # "already connected", and never dials again. Drop it and redial.
+        printf 'reconnecting: %s still not a device %ss after connect\n' "$tcp_serial" $((SECONDS - connected_at))
+        android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
+        android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
+        connected_at=$SECONDS
+        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+      fi
     } >>"$log" 2>&1
-    if [[ "$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>/dev/null || true)" == device ]]; then
+    state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
+    printf 'pass %s +%ss: %s\n' "$pass" $((SECONDS - started)) "${state:-no answer}" >>"$log" 2>/dev/null || true
+    if [[ "$state" == device ]]; then
       booted=$(android_run_until "$deadline" adb -s "$tcp_serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
       if [[ "$booted" == 1 ]]; then
         # Another emulator or a stale redirect could answer on the port; use

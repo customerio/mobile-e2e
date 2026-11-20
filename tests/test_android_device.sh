@@ -194,6 +194,7 @@ ADB_REBOOT_NEVER_GOES_DOWN=0
 # TCP port reports. State lives in files for the same reason as above.
 ADB_TCP_ANSWERS=1
 ADB_TCP_DEFAULT_LISTENER=0
+ADB_TCP_ALWAYS_STALE=0
 ADB_TCP_BOOT_ID="boot-a"
 adb_tcp_listening() {
   [[ "$ADB_TCP_DEFAULT_LISTENER" -eq 1 || -f "$TEST_DIR/adb-tcpip" ]]
@@ -202,16 +203,43 @@ sleep() { :; }
 adb() {
   local polls
   printf '%s\n' "$*" >>"$ADB_LOG"
+  # A serial `adb connect` registered without adbd answering stays offline.
+  if [[ "$*" == "-s 127.0.0.1:5600 get-state" && ! -f "$TEST_DIR/adb-tcp-connected" &&
+        -f "$TEST_DIR/adb-tcp-registered" ]]; then
+    printf '%s\n' 'error: device offline' >&2
+    return 1
+  elif [[ "$*" == "-s 127.0.0.1:5600 get-state" && ! -f "$TEST_DIR/adb-tcp-connected" ]]; then
+    printf '%s\n' "error: device '127.0.0.1:5600' not found" >&2
+    return 1
+  fi
   # Every command over TCP fails once the connection is gone.
   [[ "$*" != "-s 127.0.0.1:5600 "* || -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
   case "$*" in
     "start-server") return 0 ;;
-    "disconnect "*) rm -f "$TEST_DIR/adb-tcp-connected" ;;
+    "disconnect "*) rm -f "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-tcp-registered" ;;
     *" tcpip 5555") : >"$TEST_DIR/adb-tcpip" ;;
     *" shell getprop service.adb.tcp.port")
       [[ ! -f "$TEST_DIR/adb-tcpip" ]] || printf '%s\n' 5555
       ;;
-    *" emu redir add tcp:5600:5555") printf '%s\n' OK ;;
+    *" emu redir add tcp:5600:5555")
+      # The console refuses while it starts; the emulator keeps a redirect
+      # until it exits.
+      polls=$(cat "$TEST_DIR/adb-redir-refusals" 2>/dev/null || printf 0)
+      if [[ "$polls" -gt 0 ]]; then
+        printf '%s' $((polls - 1)) >"$TEST_DIR/adb-redir-refusals"
+        printf '%s\n' 'error: could not connect to TCP port 5554: Connection refused' >&2
+        return 1
+      elif [[ -f "$TEST_DIR/adb-redir" ]]; then
+        printf '%s\n' "KO: host port already active, use 'redir del' to remove first"
+      else
+        : >"$TEST_DIR/adb-redir"
+        printf '%s\n' OK
+      fi
+      ;;
+    *" emu redir list")
+      [[ ! -f "$TEST_DIR/adb-redir" ]] || printf '%s\n' 'tcp:5600  => 5555 '
+      printf '%s\n' OK
+      ;;
     *" shell cat /proc/net/tcp /proc/net/tcp6")
       printf '%s\n' '  sl  local_address rem_address   st tx_queue rx_queue'
       printf '%s\n' '   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:00000000'
@@ -219,7 +247,22 @@ adb() {
         printf '%s\n' '   1: 00000000:15B3 00000000:0000 0A 00000000:00000000 00:00000000'
       ;;
     "connect 127.0.0.1:5600")
-      if [[ "$ADB_TCP_ANSWERS" -eq 1 ]] && adb_tcp_listening; then
+      # adb-tcp-stale-connects is how many connects adbd never answers (every
+      # one with ADB_TCP_ALWAYS_STALE=1): adb
+      # registers the serial anyway, and every later connect to it only says
+      # "already connected" until it is disconnected.
+      polls=$(cat "$TEST_DIR/adb-tcp-stale-connects" 2>/dev/null || printf 0)
+      if [[ -f "$TEST_DIR/adb-tcp-connected" || -f "$TEST_DIR/adb-tcp-registered" ]]; then
+        printf '%s\n' 'already connected to 127.0.0.1:5600'
+      elif [[ ! -f "$TEST_DIR/adb-redir" ]]; then
+        printf '%s\n' 'failed to connect to 127.0.0.1:5600: Connection refused'
+        return 1
+      elif [[ "$ADB_TCP_ALWAYS_STALE" -eq 1 || "$polls" -gt 0 ]]; then
+        [[ "$polls" -eq 0 ]] || printf '%s' $((polls - 1)) >"$TEST_DIR/adb-tcp-stale-connects"
+        : >"$TEST_DIR/adb-tcp-registered"
+        printf '%s\n' 'failed to connect to 127.0.0.1:5600'
+        return 1
+      elif [[ "$ADB_TCP_ANSWERS" -eq 1 ]] && adb_tcp_listening; then
         : >"$TEST_DIR/adb-tcp-connected"
         printf '%s\n' 'connected to 127.0.0.1:5600'
       else
@@ -233,7 +276,13 @@ adb() {
       ;;
     "-s 127.0.0.1:5600 shell getprop sys.boot_completed")
       [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
-      printf '%s\n' 1
+      polls=$(cat "$TEST_DIR/adb-tcp-booting" 2>/dev/null || printf 0)
+      if [[ "$polls" -gt 0 ]]; then
+        printf '%s' $((polls - 1)) >"$TEST_DIR/adb-tcp-booting"
+        printf '%s\n' 0
+      else
+        printf '%s\n' 1
+      fi
       ;;
     "-s 127.0.0.1:5600 shell cat /proc/sys/kernel/random/boot_id")
       [[ -f "$TEST_DIR/adb-tcp-connected" ]] || return 1
@@ -554,11 +603,14 @@ run_pre_identify_recovery
 
 # ADB moves onto adbd's TCP listener through the emulator's port redirect.
 reset_adb_tcp() {
-  rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls"
+  rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls" \
+    "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-stale-connects" "$TEST_DIR/adb-redir" \
+    "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log"
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
   ADB_TCP_DEFAULT_LISTENER=0
+  ADB_TCP_ALWAYS_STALE=0
   ADB_TCP_BOOT_ID="boot-a"
   ADB_STATE="device"
   ADB_BOOTED="1"
@@ -576,14 +628,106 @@ grep -Fxq -- 'connect 127.0.0.1:5600' "$ADB_LOG"
 grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -Fq 'connected to 127.0.0.1:5600' "$TEST_DIR/adb-transport.log"
 grep -Fxq 'boot_id boot-a on both serials' "$TEST_DIR/adb-transport.log"
-# Once adbd listens on TCP, a second switch does not restart it again.
+grep -Eq '^pass 1 \+[0-9]+s: device$' "$TEST_DIR/adb-transport.log"
+# Once adbd listens on TCP, a second switch does not restart it again, and the
+# emulator's existing redirect is used as it is.
 : >"$ADB_LOG"
-use_android_adb_over_tcp emulator-5554
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
 [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
 if grep -Fq 'tcpip' "$ADB_LOG"; then
   echo "expected no adbd restart when it already listens on TCP" >&2
   exit 1
 fi
+[[ "$(grep -Fxc -- '-s emulator-5554 emu redir add tcp:5600:5555' "$ADB_LOG")" -eq 1 ]]
+grep -Fq 'host port already active' "$TEST_DIR/adb-transport.log"
+
+# The first connect can leave the TCP serial registered but offline, after
+# which `adb connect` only says "already connected". The switch logs the
+# state on every pass, then disconnects the stale serial and dials again; the
+# redirect, added once, is still there.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 1 >"$TEST_DIR/adb-tcp-stale-connects"
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_RECONNECT_SECONDS
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 2 ]]
+[[ "$(grep -Fxc 'disconnect 127.0.0.1:5600' "$ADB_LOG")" -eq 2 ]]
+[[ "$(grep -Fxc -- '-s emulator-5554 emu redir add tcp:5600:5555' "$ADB_LOG")" -eq 1 ]]
+grep -Eq '^pass 1 \+[0-9]+s: error: device offline$' "$TEST_DIR/adb-transport.log"
+grep -Fq 'reconnecting: 127.0.0.1:5600 still not a device' "$TEST_DIR/adb-transport.log"
+grep -Fq 'tcp:5600  => 5555' "$TEST_DIR/adb-transport.log"
+grep -Eq '^pass 2 \+[0-9]+s: device$' "$TEST_DIR/adb-transport.log"
+if grep -Fq 'already connected' "$TEST_DIR/adb-transport.log"; then
+  echo "expected a redial, not another connect to the registered serial" >&2
+  exit 1
+fi
+# Before the reconnect interval has passed, a pass leaves the connection alone.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 1 >"$TEST_DIR/adb-tcp-stale-connects"
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+ANDROID_ADB_TCP_RECONNECT_SECONDS=60
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"; printf 'serial=%s\n' "$ANDROID_ADB_SERIAL")
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+
+# A serial that is a device but still booting is waited for, not redialled.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 2 >"$TEST_DIR/adb-tcp-booting"
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_RECONNECT_SECONDS
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+
+# A redirect the console refuses at first is asked for again until it is
+# added, then never again. A connect refused for want of it registers nothing,
+# so the next pass dials straight away rather than waiting to redial.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 2 >"$TEST_DIR/adb-redir-refusals"
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc -- '-s emulator-5554 emu redir add tcp:5600:5555' "$ADB_LOG")" -eq 3 ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 3 ]]
+[[ "$(grep -Fxc 'disconnect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+# Several stale connects in a row are each dropped and redialled.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 3 >"$TEST_DIR/adb-tcp-stale-connects"
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_RECONNECT_SECONDS
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 4 ]]
+[[ "$(grep -Fc 'reconnecting: 127.0.0.1:5600' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
+
+# A serial that never comes online, redialled on every pass, is still bounded
+# by the budget and falls back to the emulator pipe without failing the run.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=5
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+STARTED_AT=$SECONDS
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"; printf 'status=%s serial=%s\n' "$?" "$ANDROID_ADB_SERIAL")
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+(( SECONDS - STARTED_AT <= 20 ))
+grep -Fxq 'status=0 serial=emulator-5554' <<<"$TCP_OUTPUT"
+grep -Eq '^::warning::adb transport: emulator pipe \(emulator-5554\); adbd did not answer on 127.0.0.1:5600 within 5s' <<<"$TCP_OUTPUT"
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -gt 1 ]]
+[[ "$(tail -n 1 "$ADB_LOG")" == "disconnect 127.0.0.1:5600" ]]
+# An invalid reconnect interval keeps the emulator pipe.
+reset_adb_tcp
+ANDROID_ADB_TCP_RECONNECT_SECONDS=soon
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554; printf 'serial=%s\n' "$ANDROID_ADB_SERIAL")
+unset ANDROID_ADB_TCP_RECONNECT_SECONDS
+grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
+grep -Fq 'invalid ANDROID_ADB_TCP_PORT' <<<"$TCP_OUTPUT"
 
 # adbd never answering on TCP keeps the emulator pipe, with a warning, and
 # never fails the run.
