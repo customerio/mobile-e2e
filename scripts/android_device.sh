@@ -268,8 +268,11 @@ use_android_adb_over_tcp() {
     note "adb transport: emulator pipe ($emulator_serial); ANDROID_ADB_TCP_PORT=off"
     return 0
   fi
+  # 5554-5585 are the emulators' own console/adb ports: a redirect there fails, and
+  # connecting to it reaches adbd through the pipe while reporting "tcp".
   if ! [[ "$host_port" =~ ^[1-9][0-9]*$ && "$timeout_seconds" =~ ^[1-9][0-9]*$ &&
-          "$reconnect_seconds" =~ ^[0-9]+$ ]]; then
+          "$reconnect_seconds" =~ ^[0-9]+$ ]] ||
+     (( host_port > 65535 || (host_port >= 5554 && host_port <= 5585) )); then
     printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_PORT, ANDROID_ADB_TCP_TIMEOUT_SECONDS or ANDROID_ADB_TCP_RECONNECT_SECONDS\n' \
       "$emulator_serial"
     return 0

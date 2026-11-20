@@ -728,6 +728,17 @@ TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554; printf 'serial=%s\n' "$ANDR
 unset ANDROID_ADB_TCP_RECONNECT_SECONDS
 grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
 grep -Fq 'invalid ANDROID_ADB_TCP_PORT' <<<"$TCP_OUTPUT"
+# A port in the emulators' own range, or past 65535, keeps the emulator pipe
+# and never dials it.
+for bad_port in 5554 5555 5585 70000; do
+  reset_adb_tcp
+  ANDROID_ADB_TCP_PORT=$bad_port
+  TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554; printf 'serial=%s\n' "$ANDROID_ADB_SERIAL")
+  unset ANDROID_ADB_TCP_PORT
+  grep -Fxq 'serial=emulator-5554' <<<"$TCP_OUTPUT"
+  grep -Fq 'invalid ANDROID_ADB_TCP_PORT' <<<"$TCP_OUTPUT"
+  [[ "$(grep -Fc "connect 127.0.0.1:$bad_port" "$ADB_LOG" 2>/dev/null || true)" == 0 ]]
+done
 
 # adbd never answering on TCP keeps the emulator pipe, with a warning, and
 # never fails the run.
