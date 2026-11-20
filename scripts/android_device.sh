@@ -252,6 +252,8 @@ use_android_adb_over_tcp() {
   local log="${2:-/dev/null}"
   local host_port="${ANDROID_ADB_TCP_PORT:-}"
   local timeout_seconds="${ANDROID_ADB_TCP_TIMEOUT_SECONDS:-60}"
+  # connected_at is set before a connect that can block up to 10 s, so with the
+  # default 12 s a failed connect is redialled on the next pass.
   local reconnect_seconds="${ANDROID_ADB_TCP_RECONNECT_SECONDS:-12}"
   local tcp_serial deadline started booted tcp_port emulator_boot tcp_boot redir
   local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
@@ -323,14 +325,22 @@ use_android_adb_over_tcp() {
         android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
       elif [[ "$state" != device ]] && (( SECONDS - connected_at >= reconnect_seconds )); then
         # `adb connect` registers the serial before adbd answers and keeps it
-        # registered, offline, after its own 10 s wait gives up; a later
-        # connect then fails register_socket_transport with EALREADY,
-        # "already connected", and never dials again. Drop it and redial.
-        printf 'reconnecting: %s still not a device %ss after connect\n' "$tcp_serial" $((SECONDS - connected_at))
-        android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
-        android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
-        connected_at=$SECONDS
-        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+        # registered, offline, after its own 10 s wait gives up. Each later
+        # connect opens a fresh socket through the redirect, then drops it when
+        # registering the serial fails with EALREADY ("already connected"), so
+        # the stale transport is kept until it is disconnected. The state above
+        # is from before the sleep, and the serial can come online by itself in
+        # between, so ask again: only a serial that still is not a device is
+        # dropped and redialled.
+        state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
+        if [[ "$state" != device ]]; then
+          printf 'reconnecting: %s still not a device %ss after connect (%s)\n' \
+            "$tcp_serial" $((SECONDS - connected_at)) "${state:-no answer}"
+          android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
+          android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
+          connected_at=$SECONDS
+          android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+        fi
       fi
     } >>"$log" 2>&1
     state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
