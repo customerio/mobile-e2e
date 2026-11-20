@@ -203,6 +203,18 @@ sleep() { :; }
 adb() {
   local polls
   printf '%s\n' "$*" >>"$ADB_LOG"
+  # adb-tcp-online-after: how many more get-states a registered, offline
+  # serial answers before adbd's answer arrives and it comes online by itself.
+  if [[ "$*" == "-s 127.0.0.1:5600 get-state" && -f "$TEST_DIR/adb-tcp-registered" &&
+        -f "$TEST_DIR/adb-tcp-online-after" ]]; then
+    polls=$(<"$TEST_DIR/adb-tcp-online-after")
+    if [[ "$polls" -gt 0 ]]; then
+      printf '%s' $((polls - 1)) >"$TEST_DIR/adb-tcp-online-after"
+    else
+      rm -f "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-online-after"
+      : >"$TEST_DIR/adb-tcp-connected"
+    fi
+  fi
   # A serial `adb connect` registered without adbd answering stays offline.
   if [[ "$*" == "-s 127.0.0.1:5600 get-state" && ! -f "$TEST_DIR/adb-tcp-connected" &&
         -f "$TEST_DIR/adb-tcp-registered" ]]; then
@@ -680,7 +692,8 @@ grep -Fq 'crash buffer line' "$DROP_STATE"
 reset_adb_tcp() {
   rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls" \
     "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-stale-connects" "$TEST_DIR/adb-redir" \
-    "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log"
+    "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log" \
+    "$TEST_DIR/adb-tcp-online-after"
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
@@ -780,6 +793,28 @@ unset ANDROID_ADB_TCP_RECONNECT_SECONDS
 [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
 [[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 4 ]]
 [[ "$(grep -Fc 'reconnecting: 127.0.0.1:5600' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
+
+# Each 2 s sleep between passes moves the clock on 6 s, so the default 12 s
+# reconnect interval is due on the third pass.
+sleep() { SECONDS=$((SECONDS + 6)); }
+# A serial left offline by its first connect that comes online by itself,
+# answering get-state at the third pass's check, is not redialled: the state is
+# asked again right before deciding.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 1 >"$TEST_DIR/adb-tcp-stale-connects"
+printf 2 >"$TEST_DIR/adb-tcp-online-after"
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+[[ "$(grep -Fxc 'disconnect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+grep -Eq '^pass 2 \+[0-9]+s: error: device offline$' "$TEST_DIR/adb-transport.log"
+grep -Eq '^pass 3 \+[0-9]+s: device$' "$TEST_DIR/adb-transport.log"
+if grep -Fq 'reconnecting:' "$TEST_DIR/adb-transport.log"; then
+  echo "expected no redial of a serial that came online before the check" >&2
+  exit 1
+fi
+sleep() { :; }
 
 # A serial that never comes online, redialled on every pass, is still bounded
 # by the budget and falls back to the emulator pipe without failing the run.
