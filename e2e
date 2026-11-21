@@ -713,7 +713,8 @@ run_e2e() {
   fi
   if [[ "$PLATFORM" == "android" ]]; then
     start_android_device
-    use_android_adb_over_tcp "$ANDROID_SERIAL" "$ARTIFACT_DIR/adb-transport.log"
+    # PROOF ONLY (not for merge): force the first switch to time out so every job exercises the retry.
+    ANDROID_ADB_TCP_TIMEOUT_SECONDS=1 use_android_adb_over_tcp "$ANDROID_SERIAL" "$ARTIFACT_DIR/adb-transport.log"
     ANDROID_SERIAL="$ANDROID_ADB_SERIAL"
     DEVICE_ID="$ANDROID_SERIAL"
     # run.sh pulls its evidence through the emulator serial if TCP drops.
