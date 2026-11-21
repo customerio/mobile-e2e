@@ -842,7 +842,11 @@ ANDROID_ADB_TCP_RECONNECT_SECONDS=0
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >/dev/null
 [[ "$ANDROID_ADB_SERIAL" == "emulator-5554" && "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
 ADB_TCP_ALWAYS_STALE=0
+ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS=2
 retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS
+# The retry's budget is scoped to its own switch.
+[[ "$ANDROID_ADB_TCP_TIMEOUT_SECONDS" == 1 ]]
 [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
 [[ "$ANDROID_EMULATOR_SERIAL" == "emulator-5554" ]]
 [[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
@@ -868,6 +872,26 @@ grep -Fq 'adbd did not answer on 127.0.0.1:5600 within 2s' <<<"$TCP_OUTPUT"
 [[ "$(grep -c '^== switching ' "$TEST_DIR/adb-transport.log")" -eq 2 ]]
 grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log"
 unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+# An invalid retry budget is named in the warning, and the switch is not
+# retried and still reads as timed out.
+for bad_budget in soon 0; do
+  reset_adb_tcp
+  ADB_TCP_DEFAULT_LISTENER=1
+  ADB_TCP_ALWAYS_STALE=1
+  ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+  ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+  use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >/dev/null
+  : >"$ADB_LOG"
+  ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS=$bad_budget
+  TCP_OUTPUT=$(retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+    printf 'serial=%s switch=%s\n' "$ANDROID_ADB_SERIAL" "$ANDROID_ADB_TCP_SWITCH")
+  unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+  grep -Fxq 'serial=emulator-5554 switch=timeout' <<<"$TCP_OUTPUT"
+  grep -Fq 'invalid ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS, switch not retried' <<<"$TCP_OUTPUT"
+  ! grep -Fq 'invalid ANDROID_ADB_TCP_PORT' <<<"$TCP_OUTPUT" || exit 1
+  ! grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log" || exit 1
+  [[ ! -s "$ADB_LOG" ]]
+done
 # The run summary names the transport each attempt ran on.
 [[ "$(android_adb_transport_label emulator-5554 timeout)" == "emulator pipe" ]]
 [[ "$(android_adb_transport_label 127.0.0.1:5600 tcp)" == "tcp" ]]

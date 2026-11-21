@@ -389,11 +389,15 @@ use_android_adb_over_tcp() {
 # (ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS) and a boot where TCP never answers
 # costs less before the flow starts. Like the switch, it never fails the run.
 retry_android_adb_over_tcp_after_timeout() {
-  local log="${1:-/dev/null}"
+  local log="${1:-/dev/null}" budget="${ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS:-30}"
   [[ "${ANDROID_ADB_TCP_SWITCH:-}" == timeout ]] || return 0
+  if ! [[ "$budget" =~ ^[1-9][0-9]*$ ]]; then
+    printf '::warning::adb transport: emulator pipe (%s); invalid ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS, switch not retried\n' \
+      "$ANDROID_EMULATOR_SERIAL"
+    return 0
+  fi
   printf '== retrying the switch, which timed out above (%s)\n' "$(date -u +%H:%M:%S)" >>"$log" 2>/dev/null || true
-  ANDROID_ADB_TCP_TIMEOUT_SECONDS="${ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS:-30}" \
-    use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
+  ANDROID_ADB_TCP_TIMEOUT_SECONDS="$budget" use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
   [[ "$ANDROID_ADB_TCP_SWITCH" != tcp ]] || ANDROID_ADB_TCP_SWITCH=tcp-after-retry
 }
 
