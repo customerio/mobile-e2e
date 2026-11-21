@@ -848,7 +848,7 @@ retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
 [[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
 grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/switch-order"
-[[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|')" == \
+[[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|' -)" == \
    '== switching emulator-5554 to 127.0.0.1:5600|== retrying the switch, which timed out above|== switching emulator-5554 to 127.0.0.1:5600|boot_id boot-a on both serials' ]]
 # Both attempts timing out keeps the emulator pipe, warns twice and never fails
 # the run.
