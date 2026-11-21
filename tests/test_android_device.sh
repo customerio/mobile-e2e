@@ -624,6 +624,7 @@ sed -i.bak "s/DeviceServerDiedException.*/Command failed (host:transport:emulato
 rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
 pgrep() { return 1; }
 TMPDIR="$FAKE_ADB_LOG_DIR" run_pre_identify_recovery
+unset -f pgrep
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
 DROP_STATE="$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"

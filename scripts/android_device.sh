@@ -402,9 +402,9 @@ android_diagnostic() {
   return 0
 }
 
-# The host ADB server writes its log to its own stderr, so /proc names the file
-# it really uses. adb itself defaults to $TMPDIR/adb.<uid>.log when /proc is not
-# available (macOS).
+# adb writes the host server log to $TMPDIR/adb.<uid>.log by default on every
+# OS. The server's stderr is that file, so on Linux /proc names the one it
+# really uses; without /proc (macOS) we fall back to the default path.
 android_adb_server_log_path() {
   local pid path
   for pid in $(pgrep -f 'adb.*fork-server' 2>/dev/null || true); do
