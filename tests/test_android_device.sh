@@ -855,14 +855,24 @@ grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TES
 reset_adb_tcp
 ADB_TCP_DEFAULT_LISTENER=1
 ADB_TCP_ALWAYS_STALE=1
+ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS=2
 TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
   retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
   printf 'status=%s serial=%s switch=%s\n' "$?" "$ANDROID_ADB_SERIAL" "$ANDROID_ADB_TCP_SWITCH")
+unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS
 grep -Fxq 'status=0 serial=emulator-5554 switch=timeout' <<<"$TCP_OUTPUT"
 [[ "$(grep -c '^::warning::adb transport: emulator pipe (emulator-5554); adbd did not answer' <<<"$TCP_OUTPUT")" -eq 2 ]]
+# The retry runs on its own budget, not the first switch's.
+grep -Fq 'adbd did not answer on 127.0.0.1:5600 within 1s' <<<"$TCP_OUTPUT"
+grep -Fq 'adbd did not answer on 127.0.0.1:5600 within 2s' <<<"$TCP_OUTPUT"
 [[ "$(grep -c '^== switching ' "$TEST_DIR/adb-transport.log")" -eq 2 ]]
 grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log"
 unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+# The run summary names the transport each attempt ran on.
+[[ "$(android_adb_transport_label emulator-5554 timeout)" == "emulator pipe" ]]
+[[ "$(android_adb_transport_label 127.0.0.1:5600 tcp)" == "tcp" ]]
+[[ "$(android_adb_transport_label 127.0.0.1:5600 tcp-after-retry)" == "tcp after retry" ]]
+[[ "$(android_adb_transport_label 127.0.0.1:5600)" == "tcp" ]]
 # A switch that reached TCP, or was never tried, is not tried again.
 reset_adb_tcp
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"

@@ -383,15 +383,31 @@ use_android_adb_over_tcp() {
 
 # The switch runs right after boot, and on some boots no connect through the
 # redirect is answered for its whole budget while the emulator pipe works. A
-# switch that timed out is tried once more after the build and install, with
-# the same budget and log; on success ANDROID_ADB_TCP_SWITCH says so. Like the
-# switch, it never fails the run.
+# switch that timed out is tried once more after the build and install, in the
+# same log; on success ANDROID_ADB_TCP_SWITCH says so. Minutes after boot a
+# working redirect answers the first dial, so the retry gets a shorter budget
+# (ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS) and a boot where TCP never answers
+# costs less before the flow starts. Like the switch, it never fails the run.
 retry_android_adb_over_tcp_after_timeout() {
   local log="${1:-/dev/null}"
   [[ "${ANDROID_ADB_TCP_SWITCH:-}" == timeout ]] || return 0
   printf '== retrying the switch, which timed out above (%s)\n' "$(date -u +%H:%M:%S)" >>"$log" 2>/dev/null || true
-  use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
+  ANDROID_ADB_TCP_TIMEOUT_SECONDS="${ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS:-30}" \
+    use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
   [[ "$ANDROID_ADB_TCP_SWITCH" != tcp ]] || ANDROID_ADB_TCP_SWITCH=tcp-after-retry
+}
+
+# Names the transport an attempt ran on for the run summary: a host:port serial
+# is TCP, anything else the emulator pipe.
+android_adb_transport_label() {
+  local device="$1" switch="${2:-}"
+  if [[ "$device" != *:* ]]; then
+    printf 'emulator pipe\n'
+  elif [[ "$switch" == tcp-after-retry ]]; then
+    printf 'tcp after retry\n'
+  else
+    printf 'tcp\n'
+  fi
 }
 
 wait_for_android_device_reconnect() {
