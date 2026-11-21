@@ -627,7 +627,7 @@ reset_adb_tcp() {
   ADB_TCP_BOOT_ID="boot-a"
   ADB_STATE="device"
   ADB_BOOTED="1"
-  unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
+  unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL ANDROID_ADB_TCP_SWITCH E2E_DEVICE_ID
 }
 # TCP is on by default in CI and headless runs; these tests run as headless.
 HEADLESS=1
@@ -756,6 +756,52 @@ grep -Fxq 'status=0 serial=emulator-5554' <<<"$TCP_OUTPUT"
 grep -Eq '^::warning::adb transport: emulator pipe \(emulator-5554\); adbd did not answer on 127.0.0.1:5600 within 5s' <<<"$TCP_OUTPUT"
 [[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -gt 1 ]]
 [[ "$(tail -n 1 "$ADB_LOG")" == "disconnect 127.0.0.1:5600" ]]
+
+# A switch that timed out right after boot is tried once more after the build,
+# in the same log, and ends on TCP when adbd answers by then.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >/dev/null
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" && "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
+ADB_TCP_ALWAYS_STALE=0
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$ANDROID_EMULATOR_SERIAL" == "emulator-5554" ]]
+[[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
+grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
+grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/switch-order"
+[[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|')" == \
+   '== switching emulator-5554 to 127.0.0.1:5600|== retrying the switch, which timed out above|== switching emulator-5554 to 127.0.0.1:5600|boot_id boot-a on both serials' ]]
+# Both attempts timing out keeps the emulator pipe, warns twice and never fails
+# the run.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+  retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+  printf 'status=%s serial=%s switch=%s\n' "$?" "$ANDROID_ADB_SERIAL" "$ANDROID_ADB_TCP_SWITCH")
+grep -Fxq 'status=0 serial=emulator-5554 switch=timeout' <<<"$TCP_OUTPUT"
+[[ "$(grep -c '^::warning::adb transport: emulator pipe (emulator-5554); adbd did not answer' <<<"$TCP_OUTPUT")" -eq 2 ]]
+[[ "$(grep -c '^== switching ' "$TEST_DIR/adb-transport.log")" -eq 2 ]]
+grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+# A switch that reached TCP, or was never tried, is not tried again.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+: >"$ADB_LOG"
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" && "$ANDROID_ADB_TCP_SWITCH" == tcp ]]
+[[ ! -s "$ADB_LOG" ]]
+reset_adb_tcp
+ANDROID_ADB_TCP_PORT=off
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_PORT
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" && "$ANDROID_ADB_TCP_SWITCH" == off ]]
+[[ ! -s "$ADB_LOG" && ! -e "$TEST_DIR/adb-transport.log" ]]
 # An invalid reconnect interval keeps the emulator pipe.
 reset_adb_tcp
 ANDROID_ADB_TCP_RECONNECT_SECONDS=soon

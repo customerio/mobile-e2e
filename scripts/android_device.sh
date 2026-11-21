@@ -247,6 +247,8 @@ android_boot_id() {
 # default only in CI and headless runs (CI or HEADLESS=1); ANDROID_ADB_TCP_PORT
 # picks the host port, or turns it on or off anywhere. Any failure keeps the
 # emulator serial: the run must never fail because of the switch.
+# ANDROID_ADB_TCP_SWITCH says how it ended: off (not tried), tcp, other-device
+# or timeout.
 use_android_adb_over_tcp() {
   local emulator_serial="$1"
   local log="${2:-/dev/null}"
@@ -259,6 +261,7 @@ use_android_adb_over_tcp() {
   local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
   ANDROID_EMULATOR_SERIAL="$emulator_serial"
   ANDROID_ADB_SERIAL="$emulator_serial"
+  ANDROID_ADB_TCP_SWITCH=off
   if [[ -z "$host_port" ]]; then
     if [[ -z "${CI:-}" && "${HEADLESS:-0}" != 1 ]]; then
       note "adb transport: emulator pipe ($emulator_serial); TCP is the default only in CI or --headless (set ANDROID_ADB_TCP_PORT to use it)"
@@ -354,11 +357,13 @@ use_android_adb_over_tcp() {
         tcp_boot=$(android_boot_id "$tcp_serial" "$deadline")
         if [[ -n "$emulator_boot" && "$emulator_boot" == "$tcp_boot" ]]; then
           ANDROID_ADB_SERIAL="$tcp_serial"
+          ANDROID_ADB_TCP_SWITCH=tcp
           printf 'boot_id %s on both serials\n' "$tcp_boot" >>"$log"
           note "adb transport: tcp ($tcp_serial, redirected by $emulator_serial)"
           return 0
         elif [[ -n "$emulator_boot" && -n "$tcp_boot" ]]; then
           android_run_until "$deadline" adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+          ANDROID_ADB_TCP_SWITCH=other-device
           printf '::warning::adb transport: emulator pipe (%s); %s is another device (boot_id %s, not %s)\n' \
             "$emulator_serial" "$tcp_serial" "$tcp_boot" "$emulator_boot"
           return 0
@@ -367,12 +372,26 @@ use_android_adb_over_tcp() {
     fi
     if (( SECONDS >= deadline )); then
       android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      ANDROID_ADB_TCP_SWITCH=timeout
       printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
         "$emulator_serial" "$tcp_serial" "$timeout_seconds"
       return 0
     fi
     sleep 2
   done
+}
+
+# The switch runs right after boot, and on some boots no connect through the
+# redirect is answered for its whole budget while the emulator pipe works. A
+# switch that timed out is tried once more after the build and install, with
+# the same budget and log; on success ANDROID_ADB_TCP_SWITCH says so. Like the
+# switch, it never fails the run.
+retry_android_adb_over_tcp_after_timeout() {
+  local log="${1:-/dev/null}"
+  [[ "${ANDROID_ADB_TCP_SWITCH:-}" == timeout ]] || return 0
+  printf '== retrying the switch, which timed out above (%s)\n' "$(date -u +%H:%M:%S)" >>"$log" 2>/dev/null || true
+  use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
+  [[ "$ANDROID_ADB_TCP_SWITCH" != tcp ]] || ANDROID_ADB_TCP_SWITCH=tcp-after-retry
 }
 
 wait_for_android_device_reconnect() {

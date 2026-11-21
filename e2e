@@ -713,6 +713,11 @@ run_e2e() {
     # run.sh pulls its evidence through the emulator serial if TCP drops.
     export E2E_ANDROID_EMULATOR_SERIAL="$ANDROID_EMULATOR_SERIAL"
     build_and_install_android
+    retry_android_adb_over_tcp_after_timeout "$ARTIFACT_DIR/adb-transport.log"
+    ANDROID_SERIAL="$ANDROID_ADB_SERIAL"
+    DEVICE_ID="$ANDROID_SERIAL"
+    # run.sh names the transport from it, including after a recovery reboot.
+    export ANDROID_ADB_TCP_SWITCH
     adb -s "$ANDROID_SERIAL" logcat -c || true
     runner_platform="Android"
   else
