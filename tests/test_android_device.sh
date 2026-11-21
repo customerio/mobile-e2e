@@ -696,6 +696,9 @@ mkdir -p "$SERVER_LOG_ARTIFACTS"
 server_log_body() {
   sed '/^== /d' "$SERVER_LOG_ARTIFACTS/$1/adb-server.log"
 }
+# Start this case the way a new run starts, with no earlier capture.
+ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
 printf '%s\n' 'server started' 'emulator-5554: connection terminated: read failed' \
   >"$SERVER_LOG"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
@@ -705,16 +708,30 @@ ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "after restart" "$SERVER_LOG_ARTIFACTS/second"
 [[ "$(server_log_body first)" == \
    $'server started\nemulator-5554: connection terminated: read failed' ]]
+grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/first/adb-server.log"
 [[ "$(server_log_body second)" == 'emulator-5554: device came back' ]]
-grep -Fq '(appended since the previous capture)' \
+grep -Fq "(appended since the previous capture, \"at failure\" in first; earlier part in that capture's adb-server.log)" \
   "$SERVER_LOG_ARTIFACTS/second/adb-server.log"
+# The offset lives only in the shell, never in the evidence.
+[[ -z "$(find "$SERVER_LOG_ARTIFACTS" -name '.*' -print)" ]]
 
-# A log that shrank since the previous capture (a new server truncated it) is
-# copied whole again, as is a log at a different path.
+# The next run starts in a fresh shell and copies the full tail again, even
+# into the artifact directory an older run left behind.
+mkdir -p "$SERVER_LOG_ARTIFACTS/next-run"
+bash -c 'source "$1"; pgrep() { return 1; }
+  ANDROID_ADB_LOG_PATH="$2" copy_android_adb_server_log "$3" "next run"' _ \
+  "$ROOT/scripts/android_device.sh" "$SERVER_LOG" "$SERVER_LOG_ARTIFACTS/next-run"
+[[ "$(server_log_body next-run)" == "$(cat "$SERVER_LOG")" ]]
+grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/next-run/adb-server.log"
+
+# adb appends to its log, so it only shrinks when the file is deleted and
+# recreated (a tmp cleanup or a reboot); a log that shrank is copied whole
+# again, as is a log at a different path.
+rm -f "$SERVER_LOG"
 printf '%s\n' 'new server' >"$SERVER_LOG"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
-  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "truncated" "$SERVER_LOG_ARTIFACTS/truncated"
-[[ "$(server_log_body truncated)" == 'new server' ]]
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "recreated" "$SERVER_LOG_ARTIFACTS/recreated"
+[[ "$(server_log_body recreated)" == 'new server' ]]
 printf '%s\n' 'other server line one' 'other server line two' >"$SERVER_LOG.moved"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "moved" "$SERVER_LOG_ARTIFACTS/moved"
@@ -724,7 +741,11 @@ ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
 head -c 3145728 /dev/zero | tr '\0' 'x' >>"$SERVER_LOG.moved"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "flood" "$SERVER_LOG_ARTIFACTS/flood"
-[[ "$(server_log_body flood | wc -c | tr -d ' ')" -eq 2097152 ]]
+FLOOD_LOG="$SERVER_LOG_ARTIFACTS/flood/adb-server.log"
+[[ "$(tail -n +2 "$FLOOD_LOG" | tr -cd x | wc -c | tr -d ' ')" -eq 2097152 ]]
+[[ "$(tail -n +2 "$FLOOD_LOG" | wc -c | tr -d ' ')" -eq 2097152 ]]
+grep -Fq "bytes $((3145728 - 2097152 + 44))-$((3145728 + 44)) (last 2 MiB)" \
+  "$FLOOD_LOG"
 
 # ADB moves onto adbd's TCP listener through the emulator's port redirect.
 reset_adb_tcp() {
