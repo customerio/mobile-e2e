@@ -203,6 +203,18 @@ sleep() { :; }
 adb() {
   local polls
   printf '%s\n' "$*" >>"$ADB_LOG"
+  # adb-tcp-online-after: how many more get-states a registered, offline
+  # serial answers before adbd's answer arrives and it comes online by itself.
+  if [[ "$*" == "-s 127.0.0.1:5600 get-state" && -f "$TEST_DIR/adb-tcp-registered" &&
+        -f "$TEST_DIR/adb-tcp-online-after" ]]; then
+    polls=$(<"$TEST_DIR/adb-tcp-online-after")
+    if [[ "$polls" -gt 0 ]]; then
+      printf '%s' $((polls - 1)) >"$TEST_DIR/adb-tcp-online-after"
+    else
+      rm -f "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-online-after"
+      : >"$TEST_DIR/adb-tcp-connected"
+    fi
+  fi
   # A serial `adb connect` registered without adbd answering stays offline.
   if [[ "$*" == "-s 127.0.0.1:5600 get-state" && ! -f "$TEST_DIR/adb-tcp-connected" &&
         -f "$TEST_DIR/adb-tcp-registered" ]]; then
@@ -320,6 +332,14 @@ adb() {
     *" shell input keyevent 82") return 0 ;;
     "devices -l") printf '%s\n' 'emulator-5554 device product:sdk' ;;
     *" logcat -d -b crash -t 80") printf '%s\n' 'crash buffer line' ;;
+    *" shell ps -A -o PID,PPID,STIME,ETIME,NAME")
+      # A wedged transport: the query never answers until it is killed.
+      [[ "${ADB_PS_HANGS:-0}" -eq 0 ]] || exec sleep 30
+      printf '%s\n' '  PID  PPID STIME ELAPSED NAME' \
+        '  321     1 06:30   05:12 adbd' '  999   321 06:34   01:02 screenrecord' \
+        ' 1200     1 06:30   05:12 surfaceflinger'
+      ;;
+    *" logcat -d -s adbd -t 200") printf '%s\n' 'adbd log line' ;;
     *) return 64 ;;
   esac
 }
@@ -601,11 +621,78 @@ run_pre_identify_recovery
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
 
+# A drop the retry does not cover (here: after the customer was identified)
+# keeps its result but still records the transport state beside the final
+# attempt, including Maestro's "device ... not found" wording.
+FAKE_ADB_LOG_DIR="$TEST_DIR/adb-tmp"
+mkdir -p "$FAKE_ADB_LOG_DIR"
+printf '%s\n' 'emulator-5554: connection terminated: read failed' \
+  >"$FAKE_ADB_LOG_DIR/adb.$(id -u).log"
+write_pre_identify_fixture
+printf '%s\n' "identify userId=$PRE_IDENTIFY_EMAIL" \
+  >>"$TRANSPORT_ARTIFACTS/device-live.log"
+sed -i.bak "s/DeviceServerDiedException.*/Command failed (host:transport:emulator-5554): device 'emulator-5554' not found/" \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
+pgrep() { return 1; }
+TMPDIR="$FAKE_ADB_LOG_DIR" run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
+DROP_STATE="$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"
+grep -Fq '== at failure, not retried' "$DROP_STATE"
+grep -Fq '12.34 10.00' "$DROP_STATE"
+grep -Eq '321 +1 06:30 +05:12 adbd' "$DROP_STATE"
+if grep -Eq 'screenrecord|surfaceflinger' "$DROP_STATE"; then
+  echo "expected only adbd from the device process list" >&2
+  exit 1
+fi
+grep -Fq 'adbd log line' "$DROP_STATE"
+grep -Fq 'crash buffer line' "$DROP_STATE"
+grep -Fq 'connection terminated: read failed' \
+  "$TRANSPORT_ARTIFACTS/device-transport-drop/adb-server.log"
+
+# "Element not found" is an ordinary Maestro warning, not a transport drop, and
+# a failure without a drop records nothing.
+write_pre_identify_fixture
+sed -i.bak "s/DeviceServerDiedException.*/CommandWarned: Element not found: Text matching regex: Continue/" \
+  "$TRANSPORT_ARTIFACTS/debug/maestro.log"
+rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
+run_pre_identify_recovery
+[[ "$android_recovery_result" -eq 7 ]]
+[[ ! -e "$TRANSPORT_ARTIFACTS/device-transport-drop" ]]
+
+# A retry that drops again records the state at the retry failure too.
+write_pre_identify_fixture
+rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
+ANDROID_RETRY_CALLS=0
+ANDROID_RETRY_RESULT=9
+set +e
+run_android_transport_recovery_once \
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+  >"$RECOVERY_OUTPUT"
+android_recovery_result=$?
+set -e
+ANDROID_RETRY_RESULT=0
+[[ "$android_recovery_result" -eq 9 ]]
+grep -Fq '== at retry failure' "$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"
+
+# A query that hangs on a wedged transport is cut off, the rest of the capture
+# still runs, and the capture cannot fail the caller.
+rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
+ADB_PS_HANGS=1
+ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS=2
+capture_android_transport_diagnostics "$TRANSPORT_ARTIFACTS" "emulator-5554" "wedged" \
+  "$TRANSPORT_ARTIFACTS/device-transport-drop"
+unset ADB_PS_HANGS ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS
+grep -Fq '(gave up after 2s)' "$DROP_STATE"
+grep -Fq 'crash buffer line' "$DROP_STATE"
+
 # ADB moves onto adbd's TCP listener through the emulator's port redirect.
 reset_adb_tcp() {
   rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls" \
     "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-stale-connects" "$TEST_DIR/adb-redir" \
-    "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log"
+    "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log" \
+    "$TEST_DIR/adb-tcp-online-after"
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
@@ -614,7 +701,7 @@ reset_adb_tcp() {
   ADB_TCP_BOOT_ID="boot-a"
   ADB_STATE="device"
   ADB_BOOTED="1"
-  unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
+  unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL ANDROID_ADB_TCP_SWITCH E2E_DEVICE_ID
 }
 # TCP is on by default in CI and headless runs; these tests run as headless.
 HEADLESS=1
@@ -706,6 +793,28 @@ unset ANDROID_ADB_TCP_RECONNECT_SECONDS
 [[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 4 ]]
 [[ "$(grep -Fc 'reconnecting: 127.0.0.1:5600' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
 
+# Each 2 s sleep between passes moves the clock on 6 s, so the default 12 s
+# reconnect interval is due on the third pass.
+sleep() { SECONDS=$((SECONDS + 6)); }
+# A serial left offline by its first connect that comes online by itself,
+# answering get-state at the third pass's check, is not redialled: the state is
+# asked again right before deciding.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+printf 1 >"$TEST_DIR/adb-tcp-stale-connects"
+printf 2 >"$TEST_DIR/adb-tcp-online-after"
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+[[ "$(grep -Fxc 'disconnect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+grep -Eq '^pass 2 \+[0-9]+s: error: device offline$' "$TEST_DIR/adb-transport.log"
+grep -Eq '^pass 3 \+[0-9]+s: device$' "$TEST_DIR/adb-transport.log"
+if grep -Fq 'reconnecting:' "$TEST_DIR/adb-transport.log"; then
+  echo "expected no redial of a serial that came online before the check" >&2
+  exit 1
+fi
+sleep() { :; }
+
 # A serial that never comes online, redialled on every pass, is still bounded
 # by the budget and falls back to the emulator pipe without failing the run.
 reset_adb_tcp
@@ -721,6 +830,52 @@ grep -Fxq 'status=0 serial=emulator-5554' <<<"$TCP_OUTPUT"
 grep -Eq '^::warning::adb transport: emulator pipe \(emulator-5554\); adbd did not answer on 127.0.0.1:5600 within 5s' <<<"$TCP_OUTPUT"
 [[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -gt 1 ]]
 [[ "$(tail -n 1 "$ADB_LOG")" == "disconnect 127.0.0.1:5600" ]]
+
+# A switch that timed out right after boot is tried once more after the build,
+# in the same log, and ends on TCP when adbd answers by then.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
+ANDROID_ADB_TCP_RECONNECT_SECONDS=0
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >/dev/null
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" && "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
+ADB_TCP_ALWAYS_STALE=0
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$ANDROID_EMULATOR_SERIAL" == "emulator-5554" ]]
+[[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
+grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
+grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/switch-order"
+[[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|')" == \
+   '== switching emulator-5554 to 127.0.0.1:5600|== retrying the switch, which timed out above|== switching emulator-5554 to 127.0.0.1:5600|boot_id boot-a on both serials' ]]
+# Both attempts timing out keeps the emulator pipe, warns twice and never fails
+# the run.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+TCP_OUTPUT=$(use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+  retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+  printf 'status=%s serial=%s switch=%s\n' "$?" "$ANDROID_ADB_SERIAL" "$ANDROID_ADB_TCP_SWITCH")
+grep -Fxq 'status=0 serial=emulator-5554 switch=timeout' <<<"$TCP_OUTPUT"
+[[ "$(grep -c '^::warning::adb transport: emulator pipe (emulator-5554); adbd did not answer' <<<"$TCP_OUTPUT")" -eq 2 ]]
+[[ "$(grep -c '^== switching ' "$TEST_DIR/adb-transport.log")" -eq 2 ]]
+grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
+# A switch that reached TCP, or was never tried, is not tried again.
+reset_adb_tcp
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+: >"$ADB_LOG"
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" && "$ANDROID_ADB_TCP_SWITCH" == tcp ]]
+[[ ! -s "$ADB_LOG" ]]
+reset_adb_tcp
+ANDROID_ADB_TCP_PORT=off
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_PORT
+[[ "$ANDROID_ADB_SERIAL" == "emulator-5554" && "$ANDROID_ADB_TCP_SWITCH" == off ]]
+[[ ! -s "$ADB_LOG" && ! -e "$TEST_DIR/adb-transport.log" ]]
 # An invalid reconnect interval keeps the emulator pipe.
 reset_adb_tcp
 ANDROID_ADB_TCP_RECONNECT_SECONDS=soon

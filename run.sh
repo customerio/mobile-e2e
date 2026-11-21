@@ -37,7 +37,8 @@ rm -f "$OUT_DIR/device.mp4" "$OUT_DIR/annotated.mp4" "$OUT_DIR/run.log"
 if [[ "${E2E_RECOVERY_ATTEMPT:-0}" != 1 ]]; then
   for recovery_dir in \
     "$OUT_DIR/driver-recovery-attempt-1" \
-    "$OUT_DIR/device-recovery-attempt-1"; do
+    "$OUT_DIR/device-recovery-attempt-1" \
+    "$OUT_DIR/device-transport-drop"; do
     if [[ -L "$recovery_dir" || -f "$recovery_dir" ]]; then
       rm -f "$recovery_dir"
     elif [[ -d "$recovery_dir" ]]; then
@@ -153,6 +154,7 @@ fi
 SINK_PID=""
 REC_PID=""
 DEVICE_LOG_PID=""
+VMSTAT_PID=""
 cleanup() {
   if [[ "$PLATFORM" == Android && -n "$ANDROID_DEVICE" ]]; then
     [[ -n "${ANDROID_RECORD_STOP:-}" ]] && : >"$ANDROID_RECORD_STOP"
@@ -166,6 +168,10 @@ cleanup() {
   if [[ -n "$DEVICE_LOG_PID" ]]; then
     kill "$DEVICE_LOG_PID" >/dev/null 2>&1 || true
     wait "$DEVICE_LOG_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$VMSTAT_PID" ]]; then
+    kill "$VMSTAT_PID" >/dev/null 2>&1 || true
+    wait "$VMSTAT_PID" 2>/dev/null || true
   fi
   if [[ -n "$SINK_PID" ]]; then
     kill "$SINK_PID" >/dev/null 2>&1 || true
@@ -242,6 +248,16 @@ if [[ "$PLATFORM" == Android ]]; then
     'CustomerIO:V' '[CIO]:V' 'AndroidRuntime:E' 'ActivityManager:W' '*:S' \
     >"$OUT_DIR/device-live.log" 2>&1 &
   DEVICE_LOG_PID=$!
+  # Host CPU, run queue and memory each second, to line up against an ADB
+  # transport drop. Linux runners only; macOS has no vmstat.
+  if command -v vmstat >/dev/null 2>&1; then
+    if command -v stdbuf >/dev/null 2>&1; then
+      stdbuf -oL vmstat -t 1 >"$OUT_DIR/host-vmstat.log" 2>&1 &
+    else
+      vmstat -t 1 >"$OUT_DIR/host-vmstat.log" 2>&1 &
+    fi
+    VMSTAT_PID=$!
+  fi
 else
   FRAMES_DIR="$OUT_DIR/frames"
   rm -rf "$FRAMES_DIR" && mkdir -p "$FRAMES_DIR"
@@ -264,7 +280,10 @@ if [[ "$PLATFORM" == Android ]]; then
   # e2e moves ADB to TCP (a host:port serial) unless that failed. Name the
   # transport each attempt ran on, so a drop can be traced to one of them.
   ADB_TRANSPORT="emulator pipe"
-  [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
+  if [[ "$ANDROID_DEVICE" == *:* ]]; then
+    ADB_TRANSPORT="tcp"
+    [[ "${ANDROID_ADB_TCP_SWITCH:-}" != tcp-after-retry ]] || ADB_TRANSPORT="tcp after retry"
+  fi
   printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
     "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
     | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
@@ -339,6 +358,11 @@ if [[ -n "$DEVICE_LOG_PID" ]]; then
   kill "$DEVICE_LOG_PID" >/dev/null 2>&1 || true
   wait "$DEVICE_LOG_PID" 2>/dev/null || true
   DEVICE_LOG_PID=""
+fi
+if [[ -n "$VMSTAT_PID" ]]; then
+  kill "$VMSTAT_PID" >/dev/null 2>&1 || true
+  wait "$VMSTAT_PID" 2>/dev/null || true
+  VMSTAT_PID=""
 fi
 
 # Maestro persists imported flow variables in commands-*.json. Scrub backend
