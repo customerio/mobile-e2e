@@ -280,7 +280,10 @@ if [[ "$PLATFORM" == Android ]]; then
   # e2e moves ADB to TCP (a host:port serial) unless that failed. Name the
   # transport each attempt ran on, so a drop can be traced to one of them.
   ADB_TRANSPORT="emulator pipe"
-  [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
+  if [[ "$ANDROID_DEVICE" == *:* ]]; then
+    ADB_TRANSPORT="tcp"
+    [[ "${ANDROID_ADB_TCP_SWITCH:-}" != tcp-after-retry ]] || ADB_TRANSPORT="tcp after retry"
+  fi
   printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
     "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
     | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
