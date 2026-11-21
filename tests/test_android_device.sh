@@ -6,6 +6,20 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../scripts/android_device.sh
 source "$ROOT/scripts/android_device.sh"
 
+# Keep the diagnostics tests off this machine's real ADB server log: no running
+# server is found, no exported log path wins, and the default log names (keyed
+# by uid) point at files that do not exist. A case that needs a server log sets
+# ANDROID_ADB_LOG_PATH or TMPDIR itself.
+unset ANDROID_ADB_LOG_PATH
+pgrep() { return 1; }
+id() {
+  if [[ "${1:-}" == "-u" ]]; then
+    printf '%s\n' 'mobile-e2e-test'
+  else
+    command id "$@"
+  fi
+}
+
 NOTES=""
 note() {
   NOTES+="$*"$'\n'
@@ -622,9 +636,7 @@ printf '%s\n' "identify userId=$PRE_IDENTIFY_EMAIL" \
 sed -i.bak "s/DeviceServerDiedException.*/Command failed (host:transport:emulator-5554): device 'emulator-5554' not found/" \
   "$TRANSPORT_ARTIFACTS/debug/maestro.log"
 rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
-pgrep() { return 1; }
 TMPDIR="$FAKE_ADB_LOG_DIR" run_pre_identify_recovery
-unset -f pgrep
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
 DROP_STATE="$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"
@@ -675,6 +687,44 @@ capture_android_transport_diagnostics "$TRANSPORT_ARTIFACTS" "emulator-5554" "we
 unset ADB_PS_HANGS ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS
 grep -Fq '(gave up after 2s)' "$DROP_STATE"
 grep -Fq 'crash buffer line' "$DROP_STATE"
+
+# The first capture in a run copies the last 2 MiB of the host ADB server log;
+# a later one copies only what the log gained since the previous capture.
+SERVER_LOG="$TEST_DIR/adb-server-under-test.log"
+SERVER_LOG_ARTIFACTS="$TEST_DIR/server-log-artifacts"
+mkdir -p "$SERVER_LOG_ARTIFACTS"
+server_log_body() {
+  sed '/^== /d' "$SERVER_LOG_ARTIFACTS/$1/adb-server.log"
+}
+printf '%s\n' 'server started' 'emulator-5554: connection terminated: read failed' \
+  >"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "at failure" "$SERVER_LOG_ARTIFACTS/first"
+printf '%s\n' 'emulator-5554: device came back' >>"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "after restart" "$SERVER_LOG_ARTIFACTS/second"
+[[ "$(server_log_body first)" == \
+   $'server started\nemulator-5554: connection terminated: read failed' ]]
+[[ "$(server_log_body second)" == 'emulator-5554: device came back' ]]
+grep -Fq '(appended since the previous capture)' \
+  "$SERVER_LOG_ARTIFACTS/second/adb-server.log"
+
+# A log that shrank since the previous capture (a new server truncated it) is
+# copied whole again, as is a log at a different path.
+printf '%s\n' 'new server' >"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "truncated" "$SERVER_LOG_ARTIFACTS/truncated"
+[[ "$(server_log_body truncated)" == 'new server' ]]
+printf '%s\n' 'other server line one' 'other server line two' >"$SERVER_LOG.moved"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "moved" "$SERVER_LOG_ARTIFACTS/moved"
+[[ "$(server_log_body moved)" == $'other server line one\nother server line two' ]]
+
+# No copy is longer than 2 MiB, however much the log gained.
+head -c 3145728 /dev/zero | tr '\0' 'x' >>"$SERVER_LOG.moved"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "flood" "$SERVER_LOG_ARTIFACTS/flood"
+[[ "$(server_log_body flood | wc -c | tr -d ' ')" -eq 2097152 ]]
 
 # ADB moves onto adbd's TCP listener through the emulator's port redirect.
 reset_adb_tcp() {
