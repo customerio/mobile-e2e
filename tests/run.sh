@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 bash "$ROOT/tests/test_android_device.sh"
 bash "$ROOT/tests/test_ios_device.sh"
 bash "$ROOT/tests/test_version.sh"
+bash "$ROOT/tests/test_doctor.sh"
 node "$ROOT/tests/test_assert_inbox_queue_state.js"
 node "$ROOT/tests/test_assert_customer_activity.js"
 (cd "$ROOT" && python3 -m unittest discover -s tests -p 'test_*.py')
