@@ -279,8 +279,7 @@ if [[ "$PLATFORM" == Android ]]; then
   python3 "$HARNESS_DIR/scripts/e2e_diagnostics.py" android-clock "$ANDROID_DEVICE" || true
   # e2e moves ADB to TCP (a host:port serial) unless that failed. Name the
   # transport each attempt ran on, so a drop can be traced to one of them.
-  ADB_TRANSPORT="emulator pipe"
-  [[ "$ANDROID_DEVICE" == *:* ]] && ADB_TRANSPORT="tcp"
+  ADB_TRANSPORT=$(android_adb_transport_label "$ANDROID_DEVICE" "${ANDROID_ADB_TCP_SWITCH:-}")
   printf -- '- Android %s attempt %s: adb transport %s (%s)\n' \
     "${SUITE:-$FLOW_NAME}" "$((${E2E_RECOVERY_ATTEMPT:-0} + 1))" "$ADB_TRANSPORT" "$ANDROID_DEVICE" \
     | tee -a "$OUT_DIR/run.log" "${GITHUB_STEP_SUMMARY:-/dev/null}" || true

@@ -247,16 +247,21 @@ android_boot_id() {
 # default only in CI and headless runs (CI or HEADLESS=1); ANDROID_ADB_TCP_PORT
 # picks the host port, or turns it on or off anywhere. Any failure keeps the
 # emulator serial: the run must never fail because of the switch.
+# ANDROID_ADB_TCP_SWITCH says how it ended: off (not tried), tcp, other-device
+# or timeout.
 use_android_adb_over_tcp() {
   local emulator_serial="$1"
   local log="${2:-/dev/null}"
   local host_port="${ANDROID_ADB_TCP_PORT:-}"
   local timeout_seconds="${ANDROID_ADB_TCP_TIMEOUT_SECONDS:-60}"
+  # connected_at is set before a connect that can block up to 10 s, so with the
+  # default 12 s a failed connect is redialled on the next pass.
   local reconnect_seconds="${ANDROID_ADB_TCP_RECONNECT_SECONDS:-12}"
   local tcp_serial deadline started booted tcp_port emulator_boot tcp_boot redir
   local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
   ANDROID_EMULATOR_SERIAL="$emulator_serial"
   ANDROID_ADB_SERIAL="$emulator_serial"
+  ANDROID_ADB_TCP_SWITCH=off
   if [[ -z "$host_port" ]]; then
     if [[ -z "${CI:-}" && "${HEADLESS:-0}" != 1 ]]; then
       note "adb transport: emulator pipe ($emulator_serial); TCP is the default only in CI or --headless (set ANDROID_ADB_TCP_PORT to use it)"
@@ -323,14 +328,22 @@ use_android_adb_over_tcp() {
         android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
       elif [[ "$state" != device ]] && (( SECONDS - connected_at >= reconnect_seconds )); then
         # `adb connect` registers the serial before adbd answers and keeps it
-        # registered, offline, after its own 10 s wait gives up; a later
-        # connect then fails register_socket_transport with EALREADY,
-        # "already connected", and never dials again. Drop it and redial.
-        printf 'reconnecting: %s still not a device %ss after connect\n' "$tcp_serial" $((SECONDS - connected_at))
-        android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
-        android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
-        connected_at=$SECONDS
-        android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+        # registered, offline, after its own 10 s wait gives up. Each later
+        # connect opens a fresh socket through the redirect, then drops it when
+        # registering the serial fails with EALREADY ("already connected"), so
+        # the stale transport is kept until it is disconnected. The state above
+        # is from before the sleep, and the serial can come online by itself in
+        # between, so ask again: only a serial that still is not a device is
+        # dropped and redialled.
+        state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
+        if [[ "$state" != device ]]; then
+          printf 'reconnecting: %s still not a device %ss after connect (%s)\n' \
+            "$tcp_serial" $((SECONDS - connected_at)) "${state:-no answer}"
+          android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
+          android_run_until "$deadline" adb -s "$emulator_serial" emu redir list 2>&1 || true
+          connected_at=$SECONDS
+          android_run_until "$deadline" adb connect "$tcp_serial" 2>&1 || true
+        fi
       fi
     } >>"$log" 2>&1
     state=$(android_run_until "$deadline" adb -s "$tcp_serial" get-state 2>&1 | head -n 1 | tr -d '\r' || true)
@@ -344,11 +357,13 @@ use_android_adb_over_tcp() {
         tcp_boot=$(android_boot_id "$tcp_serial" "$deadline")
         if [[ -n "$emulator_boot" && "$emulator_boot" == "$tcp_boot" ]]; then
           ANDROID_ADB_SERIAL="$tcp_serial"
+          ANDROID_ADB_TCP_SWITCH=tcp
           printf 'boot_id %s on both serials\n' "$tcp_boot" >>"$log"
           note "adb transport: tcp ($tcp_serial, redirected by $emulator_serial)"
           return 0
         elif [[ -n "$emulator_boot" && -n "$tcp_boot" ]]; then
           android_run_until "$deadline" adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+          ANDROID_ADB_TCP_SWITCH=other-device
           printf '::warning::adb transport: emulator pipe (%s); %s is another device (boot_id %s, not %s)\n' \
             "$emulator_serial" "$tcp_serial" "$tcp_boot" "$emulator_boot"
           return 0
@@ -357,12 +372,42 @@ use_android_adb_over_tcp() {
     fi
     if (( SECONDS >= deadline )); then
       android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      ANDROID_ADB_TCP_SWITCH=timeout
       printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
         "$emulator_serial" "$tcp_serial" "$timeout_seconds"
       return 0
     fi
     sleep 2
   done
+}
+
+# The switch runs right after boot, and on some boots no connect through the
+# redirect is answered for its whole budget while the emulator pipe works. A
+# switch that timed out is tried once more after the build and install, in the
+# same log; on success ANDROID_ADB_TCP_SWITCH says so. Minutes after boot a
+# working redirect answers the first dial, so the retry gets a shorter budget
+# (ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS) and a boot where TCP never answers
+# costs less before the flow starts. Like the switch, it never fails the run.
+retry_android_adb_over_tcp_after_timeout() {
+  local log="${1:-/dev/null}"
+  [[ "${ANDROID_ADB_TCP_SWITCH:-}" == timeout ]] || return 0
+  printf '== retrying the switch, which timed out above (%s)\n' "$(date -u +%H:%M:%S)" >>"$log" 2>/dev/null || true
+  ANDROID_ADB_TCP_TIMEOUT_SECONDS="${ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS:-30}" \
+    use_android_adb_over_tcp "$ANDROID_EMULATOR_SERIAL" "$log"
+  [[ "$ANDROID_ADB_TCP_SWITCH" != tcp ]] || ANDROID_ADB_TCP_SWITCH=tcp-after-retry
+}
+
+# Names the transport an attempt ran on for the run summary: a host:port serial
+# is TCP, anything else the emulator pipe.
+android_adb_transport_label() {
+  local device="$1" switch="${2:-}"
+  if [[ "$device" != *:* ]]; then
+    printf 'emulator pipe\n'
+  elif [[ "$switch" == tcp-after-retry ]]; then
+    printf 'tcp after retry\n'
+  else
+    printf 'tcp\n'
+  fi
 }
 
 wait_for_android_device_reconnect() {
