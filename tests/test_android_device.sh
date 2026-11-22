@@ -801,6 +801,18 @@ ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "no inode" "$SERVER_LOG_ARTIFACTS/no-inode"
 unset -f ls
 [[ "$(server_log_body no-inode)" == 'newer server line three' ]]
+# A symlinked log is told apart by its target's inode: a target replaced and
+# grown past the old offset is copied whole.
+ln -s "$SERVER_LOG" "$SERVER_LOG.link"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.link" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "link" "$SERVER_LOG_ARTIFACTS/link"
+printf '%s\n' 'linked server line one' 'linked server line two' 'linked server line three' \
+  'linked server line four' >"$SERVER_LOG.new"
+mv -f "$SERVER_LOG.new" "$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.link" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "relinked" "$SERVER_LOG_ARTIFACTS/relinked"
+[[ "$(server_log_body relinked)" == "$(cat "$SERVER_LOG")" ]]
+rm -f "$SERVER_LOG.link"
 printf '%s\n' 'other server line one' 'other server line two' >"$SERVER_LOG.moved"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "moved" "$SERVER_LOG_ARTIFACTS/moved"

@@ -529,7 +529,7 @@ capture_android_transport_diagnostics() {
 # adb opens the log for append, so a new server adds to it; the file is only
 # replaced when it is deleted and recreated (a tmp cleanup or a reboot). A log
 # at a different path or inode, or one that shrank, gets the full tail. Where
-# `ls -di` gives no inode, or a recreated file reuses the old inode number,
+# `ls -diL` gives no inode, or a recreated file reuses the old inode number,
 # only the shrink check catches a recreated log. No copy exceeds 2 MiB. Like
 # the rest of the capture, it never fails.
 ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
@@ -554,7 +554,8 @@ copy_android_adb_server_log() {
     return 0
   fi
   # `ls -di` prints the inode first on both BSD and GNU; stat's flags differ.
-  inode=$(ls -di "$adb_log" 2>/dev/null | awk '{ print $1; exit }' || true)
+  # -L reads a symlinked log's target, the file wc measures.
+  inode=$(ls -diL "$adb_log" 2>/dev/null | awk '{ print $1; exit }' || true)
   [[ "$inode" =~ ^[0-9]+$ ]] || inode=""
   if [[ "$previous_offset" =~ ^[0-9]+$ &&
         "${ANDROID_ADB_SERVER_LOG_COPIED_PATH:-}" == "$adb_log" ]] &&
