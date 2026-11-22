@@ -509,16 +509,63 @@ capture_android_transport_diagnostics() {
     printf -- '-- logcat crash buffer\n'
     android_diagnostic 15 adb -s "$guest" logcat -d -b crash -t 80 2>&1
   } >>"$out" 2>&1
-  if adb_log=$(android_adb_server_log_path); then
-    {
-      printf '== %s (%s) from %s\n' "$label" "$(date -u +%H:%M:%S)" "$adb_log"
-      # The last 2 MiB covers the whole run; a line count could cut off the
-      # drop if the server logged heavily after it.
-      tail -c 2097152 "$adb_log" 2>&1 || true
-    } >>"$out_dir/adb-server.log" 2>&1
-  else
+  copy_android_adb_server_log "$out_dir" "$label"
+  return 0
+}
+
+# Append the host ADB server log to the capture. The first capture in a run
+# takes the last 2 MiB, which covers the whole run (a line count could cut off
+# the drop if the server logged heavily after it). A later capture in the same
+# run takes only what the log gained since the previous one, so a recovery that
+# captures two or three times does not carry the same log each time. The path
+# and byte offset reached live in shell variables, so they end with the run and
+# nothing extra lands in the evidence; a capture that cannot see them (a new
+# run, or a subshell) takes the full tail again. adb opens the log for append,
+# so a new server adds to it; the log only shrinks when the file is deleted and
+# recreated (a tmp cleanup or a reboot). A log that shrank or moved gets the
+# full tail, and no copy exceeds 2 MiB. Like the rest of the capture, it never
+# fails.
+ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
+ANDROID_ADB_SERVER_LOG_COPIED_BY=""
+copy_android_adb_server_log() {
+  local out_dir="$1"
+  local label="$2"
+  local limit=2097152
+  local adb_log size start=0 copied="last 2 MiB"
+  local previous_offset="${ANDROID_ADB_SERVER_LOG_COPIED_OFFSET:-}"
+  if ! adb_log=$(android_adb_server_log_path); then
     printf '== %s: host ADB server log not found\n' "$label" >>"$out_dir/adb-server.log"
+    return 0
   fi
+  size=$(wc -c 2>/dev/null <"$adb_log" | tr -d ' ' || true)
+  if [[ ! "$size" =~ ^[0-9]+$ ]]; then
+    printf '== %s: host ADB server log %s could not be read\n' "$label" "$adb_log" \
+      >>"$out_dir/adb-server.log"
+    return 0
+  fi
+  if [[ "$previous_offset" =~ ^[0-9]+$ &&
+        "${ANDROID_ADB_SERVER_LOG_COPIED_PATH:-}" == "$adb_log" ]] &&
+     (( previous_offset <= size )); then
+    start="$previous_offset"
+    copied="appended since the previous capture, ${ANDROID_ADB_SERVER_LOG_COPIED_BY:-}; earlier part in that capture's adb-server.log"
+  fi
+  if (( size - start > limit )); then
+    start=$((size - limit))
+    copied="last 2 MiB"
+  fi
+  (( size > start )) || copied="$copied; nothing new"
+  {
+    printf '== %s (%s) from %s, bytes %s-%s (%s)\n' \
+      "$label" "$(date -u +%H:%M:%S)" "$adb_log" "$start" "$size" "$copied"
+    # BSD head rejects a count of 0, so an empty range copies nothing.
+    if (( size > start )); then
+      tail -c +"$((start + 1))" "$adb_log" 2>/dev/null | head -c "$((size - start))" || true
+    fi
+  } >>"$out_dir/adb-server.log" 2>&1
+  ANDROID_ADB_SERVER_LOG_COPIED_PATH="$adb_log"
+  ANDROID_ADB_SERVER_LOG_COPIED_OFFSET="$size"
+  ANDROID_ADB_SERVER_LOG_COPIED_BY="\"$label\" in ${out_dir##*/}"
   return 0
 }
 

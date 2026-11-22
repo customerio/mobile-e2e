@@ -6,6 +6,20 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../scripts/android_device.sh
 source "$ROOT/scripts/android_device.sh"
 
+# Keep the diagnostics tests off this machine's real ADB server log: no running
+# server is found, no exported log path wins, and the default log names (keyed
+# by uid) point at files that do not exist. A case that needs a server log sets
+# ANDROID_ADB_LOG_PATH or TMPDIR itself.
+unset ANDROID_ADB_LOG_PATH
+pgrep() { return 1; }
+id() {
+  if [[ "${1:-}" == "-u" ]]; then
+    printf '%s\n' 'mobile-e2e-test'
+  else
+    command id "$@"
+  fi
+}
+
 NOTES=""
 note() {
   NOTES+="$*"$'\n'
@@ -634,9 +648,7 @@ printf '%s\n' "identify userId=$PRE_IDENTIFY_EMAIL" \
 sed -i.bak "s/DeviceServerDiedException.*/Command failed (host:transport:emulator-5554): device 'emulator-5554' not found/" \
   "$TRANSPORT_ARTIFACTS/debug/maestro.log"
 rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
-pgrep() { return 1; }
 TMPDIR="$FAKE_ADB_LOG_DIR" run_pre_identify_recovery
-unset -f pgrep
 [[ "$android_recovery_result" -eq 7 ]]
 [[ "$ANDROID_RETRY_CALLS" -eq 0 ]]
 DROP_STATE="$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"
@@ -687,6 +699,79 @@ capture_android_transport_diagnostics "$TRANSPORT_ARTIFACTS" "emulator-5554" "we
 unset ADB_PS_HANGS ANDROID_DIAGNOSTIC_TIMEOUT_SECONDS
 grep -Fq '(gave up after 2s)' "$DROP_STATE"
 grep -Fq 'crash buffer line' "$DROP_STATE"
+
+# The first capture in a run copies the last 2 MiB of the host ADB server log;
+# a later one copies only what the log gained since the previous capture.
+SERVER_LOG="$TEST_DIR/adb-server-under-test.log"
+SERVER_LOG_ARTIFACTS="$TEST_DIR/server-log-artifacts"
+mkdir -p "$SERVER_LOG_ARTIFACTS"
+server_log_body() {
+  sed '/^== /d' "$SERVER_LOG_ARTIFACTS/$1/adb-server.log"
+}
+# Start this case the way a new run starts, with no earlier capture.
+ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
+printf '%s\n' 'server started' 'emulator-5554: connection terminated: read failed' \
+  >"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "at failure" "$SERVER_LOG_ARTIFACTS/first"
+printf '%s\n' 'emulator-5554: device came back' >>"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "after restart" "$SERVER_LOG_ARTIFACTS/second"
+[[ "$(server_log_body first)" == \
+   $'server started\nemulator-5554: connection terminated: read failed' ]]
+grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/first/adb-server.log"
+[[ "$(server_log_body second)" == 'emulator-5554: device came back' ]]
+grep -Fq "(appended since the previous capture, \"at failure\" in first; earlier part in that capture's adb-server.log)" \
+  "$SERVER_LOG_ARTIFACTS/second/adb-server.log"
+# A capture with nothing new copies nothing and runs no zero-byte head, which
+# BSD head rejects (stubbed here the way macOS behaves).
+head() {
+  if [[ "${1:-}" == -c && "${2:-}" == 0 ]]; then
+    echo "head: illegal byte count -- 0" >&2
+    return 1
+  fi
+  command head "$@"
+}
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "no growth" "$SERVER_LOG_ARTIFACTS/no-growth"
+unset -f head
+[[ -z "$(server_log_body no-growth)" ]]
+grep -Fq '; nothing new)' "$SERVER_LOG_ARTIFACTS/no-growth/adb-server.log"
+# The offset lives only in the shell, never in the evidence.
+[[ -z "$(find "$SERVER_LOG_ARTIFACTS" -name '.*' -print)" ]]
+
+# The next run starts in a fresh shell and copies the full tail again, even
+# into the artifact directory an older run left behind.
+mkdir -p "$SERVER_LOG_ARTIFACTS/next-run"
+bash -c 'source "$1"; pgrep() { return 1; }
+  ANDROID_ADB_LOG_PATH="$2" copy_android_adb_server_log "$3" "next run"' _ \
+  "$ROOT/scripts/android_device.sh" "$SERVER_LOG" "$SERVER_LOG_ARTIFACTS/next-run"
+[[ "$(server_log_body next-run)" == "$(cat "$SERVER_LOG")" ]]
+grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/next-run/adb-server.log"
+
+# adb appends to its log, so it only shrinks when the file is deleted and
+# recreated (a tmp cleanup or a reboot); a log that shrank is copied whole
+# again, as is a log at a different path.
+rm -f "$SERVER_LOG"
+printf '%s\n' 'new server' >"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "recreated" "$SERVER_LOG_ARTIFACTS/recreated"
+[[ "$(server_log_body recreated)" == 'new server' ]]
+printf '%s\n' 'other server line one' 'other server line two' >"$SERVER_LOG.moved"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "moved" "$SERVER_LOG_ARTIFACTS/moved"
+[[ "$(server_log_body moved)" == $'other server line one\nother server line two' ]]
+
+# No copy is longer than 2 MiB, however much the log gained.
+head -c 3145728 /dev/zero | tr '\0' 'x' >>"$SERVER_LOG.moved"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "flood" "$SERVER_LOG_ARTIFACTS/flood"
+FLOOD_LOG="$SERVER_LOG_ARTIFACTS/flood/adb-server.log"
+[[ "$(tail -n +2 "$FLOOD_LOG" | tr -cd x | wc -c | tr -d ' ')" -eq 2097152 ]]
+[[ "$(tail -n +2 "$FLOOD_LOG" | wc -c | tr -d ' ')" -eq 2097152 ]]
+grep -Fq "bytes $((3145728 - 2097152 + 44))-$((3145728 + 44)) (last 2 MiB)" \
+  "$FLOOD_LOG"
 
 # ADB moves onto adbd's TCP listener through the emulator's port redirect.
 reset_adb_tcp() {
