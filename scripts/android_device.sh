@@ -509,10 +509,14 @@ copy_android_adb_server_log() {
     start=$((size - limit))
     copied="last 2 MiB"
   fi
+  (( size > start )) || copied="$copied; nothing new"
   {
     printf '== %s (%s) from %s, bytes %s-%s (%s)\n' \
       "$label" "$(date -u +%H:%M:%S)" "$adb_log" "$start" "$size" "$copied"
-    tail -c +"$((start + 1))" "$adb_log" 2>/dev/null | head -c "$((size - start))" || true
+    # BSD head rejects a count of 0, so an empty range copies nothing.
+    if (( size > start )); then
+      tail -c +"$((start + 1))" "$adb_log" 2>/dev/null | head -c "$((size - start))" || true
+    fi
   } >>"$out_dir/adb-server.log" 2>&1
   ANDROID_ADB_SERVER_LOG_COPIED_PATH="$adb_log"
   ANDROID_ADB_SERVER_LOG_COPIED_OFFSET="$size"

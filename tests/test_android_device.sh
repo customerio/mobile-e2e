@@ -712,6 +712,20 @@ grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/first/adb-server.log"
 [[ "$(server_log_body second)" == 'emulator-5554: device came back' ]]
 grep -Fq "(appended since the previous capture, \"at failure\" in first; earlier part in that capture's adb-server.log)" \
   "$SERVER_LOG_ARTIFACTS/second/adb-server.log"
+# A capture with nothing new copies nothing and runs no zero-byte head, which
+# BSD head rejects (stubbed here the way macOS behaves).
+head() {
+  if [[ "${1:-}" == -c && "${2:-}" == 0 ]]; then
+    echo "head: illegal byte count -- 0" >&2
+    return 1
+  fi
+  command head "$@"
+}
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "no growth" "$SERVER_LOG_ARTIFACTS/no-growth"
+unset -f head
+[[ -z "$(server_log_body no-growth)" ]]
+grep -Fq '; nothing new)' "$SERVER_LOG_ARTIFACTS/no-growth/adb-server.log"
 # The offset lives only in the shell, never in the evidence.
 [[ -z "$(find "$SERVER_LOG_ARTIFACTS" -name '.*' -print)" ]]
 
