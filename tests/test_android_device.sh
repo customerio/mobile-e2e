@@ -674,20 +674,43 @@ run_pre_identify_recovery
 [[ "$android_recovery_result" -eq 7 ]]
 [[ ! -e "$TRANSPORT_ARTIFACTS/device-transport-drop" ]]
 
-# A retry that drops again records the state at the retry failure too.
+# A retry that drops again records the state at the retry failure too. Its copy
+# of the host ADB server log holds only what the log gained during the retry
+# and names the recovery capture that holds the rest, so the two bundles
+# together hold the whole log.
+RETRY_SERVER_LOG="$TEST_DIR/adb-server-retry.log"
+printf '%s\n' 'server started' 'emulator-5554: connection terminated: read failed' \
+  >"$RETRY_SERVER_LOG"
+ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_INODE=""
+ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
+retry_that_drops_again() {
+  printf '%s\n' 'emulator-5554: connection terminated: read failed again' \
+    >>"$RETRY_SERVER_LOG"
+  android_retry_command
+}
 write_pre_identify_fixture
 rm -rf "$TRANSPORT_ARTIFACTS/device-transport-drop"
 ANDROID_RETRY_CALLS=0
 ANDROID_RETRY_RESULT=9
 set +e
-run_android_transport_recovery_once \
-  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" android_retry_command \
+ANDROID_ADB_LOG_PATH="$RETRY_SERVER_LOG" run_android_transport_recovery_once \
+  7 "$TRANSPORT_ARTIFACTS" "emulator-5554" retry_that_drops_again \
   >"$RECOVERY_OUTPUT"
 android_recovery_result=$?
 set -e
 ANDROID_RETRY_RESULT=0
 [[ "$android_recovery_result" -eq 9 ]]
 grep -Fq '== at retry failure' "$TRANSPORT_ARTIFACTS/device-transport-drop/adb-state.txt"
+RECOVERY_SERVER_COPY="$TRANSPORT_ARTIFACTS/device-recovery-attempt-1/adb-server.log"
+RETRY_DROP_SERVER_COPY="$TRANSPORT_ARTIFACTS/device-transport-drop/adb-server.log"
+[[ "$(sed '/^== /d' "$RETRY_DROP_SERVER_COPY")" == \
+   'emulator-5554: connection terminated: read failed again' ]]
+grep -Fq "== at retry failure (" "$RETRY_DROP_SERVER_COPY"
+grep -Fq "(appended since the previous capture, \"after restart\" in device-recovery-attempt-1; earlier part in that capture's adb-server.log)" \
+  "$RETRY_DROP_SERVER_COPY"
+[[ "$(sed '/^== /d' "$RECOVERY_SERVER_COPY" "$RETRY_DROP_SERVER_COPY")" == \
+   "$(cat "$RETRY_SERVER_LOG")" ]]
 
 # A query that hangs on a wedged transport is cut off, the rest of the capture
 # still runs, and the capture cannot fail the caller.
@@ -710,6 +733,7 @@ server_log_body() {
 }
 # Start this case the way a new run starts, with no earlier capture.
 ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_INODE=""
 ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
 printf '%s\n' 'server started' 'emulator-5554: connection terminated: read failed' \
   >"$SERVER_LOG"
@@ -758,6 +782,25 @@ printf '%s\n' 'new server' >"$SERVER_LOG"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "recreated" "$SERVER_LOG_ARTIFACTS/recreated"
 [[ "$(server_log_body recreated)" == 'new server' ]]
+# A log deleted and recreated, then grown past the old offset, does not shrink;
+# its inode tells it apart, and it is copied whole. The new file is written
+# while the old one still exists, so the filesystem cannot hand it the old
+# inode number.
+printf '%s\n' 'newer server line one' 'newer server line two' >"$SERVER_LOG.new"
+old_server_log_inode=$(ls -di "$SERVER_LOG" | awk '{ print $1 }')
+mv -f "$SERVER_LOG.new" "$SERVER_LOG"
+[[ "$(ls -di "$SERVER_LOG" | awk '{ print $1 }')" != "$old_server_log_inode" ]]
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "regrown" "$SERVER_LOG_ARTIFACTS/regrown"
+[[ "$(server_log_body regrown)" == $'newer server line one\nnewer server line two' ]]
+grep -Fq '(last 2 MiB)' "$SERVER_LOG_ARTIFACTS/regrown/adb-server.log"
+# Where ls gives no inode, the path and size checks decide alone, as before.
+ls() { return 1; }
+printf '%s\n' 'newer server line three' >>"$SERVER_LOG"
+ANDROID_ADB_LOG_PATH="$SERVER_LOG" capture_android_transport_diagnostics \
+  "$SERVER_LOG_ARTIFACTS" "emulator-5554" "no inode" "$SERVER_LOG_ARTIFACTS/no-inode"
+unset -f ls
+[[ "$(server_log_body no-inode)" == 'newer server line three' ]]
 printf '%s\n' 'other server line one' 'other server line two' >"$SERVER_LOG.moved"
 ANDROID_ADB_LOG_PATH="$SERVER_LOG.moved" capture_android_transport_diagnostics \
   "$SERVER_LOG_ARTIFACTS" "emulator-5554" "moved" "$SERVER_LOG_ARTIFACTS/moved"

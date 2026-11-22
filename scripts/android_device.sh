@@ -489,7 +489,6 @@ capture_android_transport_diagnostics() {
   local guest="${ANDROID_EMULATOR_SERIAL:-$device_id}"
   local out_dir="${4:-$artifact_dir/device-recovery-attempt-1}"
   local out="$out_dir/adb-state.txt"
-  local adb_log
   mkdir -p "$out_dir"
   {
     printf '== %s (%s)\n' "$label" "$(date -u +%H:%M:%S)"
@@ -521,23 +520,29 @@ capture_android_transport_diagnostics() {
 # takes the last 2 MiB, which covers the whole run (a line count could cut off
 # the drop if the server logged heavily after it). A later capture in the same
 # run takes only what the log gained since the previous one, so a recovery that
-# captures two or three times does not carry the same log each time. The path
-# and byte offset reached live in shell variables, so they end with the run and
-# nothing extra lands in the evidence; a capture that cannot see them (a new
-# run, or a subshell) takes the full tail again. adb opens the log for append,
-# so a new server adds to it; the log only shrinks when the file is deleted and
-# recreated (a tmp cleanup or a reboot). A log that shrank or moved gets the
-# full tail, and no copy exceeds 2 MiB. Like the rest of the capture, it never
-# fails.
+# captures two or three times does not carry the same log each time, and its
+# header names the capture that holds the earlier part.
+# What was copied is tracked per process, not per output folder: the log's
+# path, inode and byte offset live in shell variables, on purpose. They end
+# with the run and nothing extra lands in the evidence; a capture that cannot
+# see them (a new run, or a subshell) takes the full tail again.
+# adb opens the log for append, so a new server adds to it; the file is only
+# replaced when it is deleted and recreated (a tmp cleanup or a reboot). A log
+# at a different path or inode, or one that shrank, gets the full tail. Where
+# `ls -di` gives no inode, or a recreated file reuses the old inode number,
+# only the shrink check catches a recreated log. No copy exceeds 2 MiB. Like
+# the rest of the capture, it never fails.
 ANDROID_ADB_SERVER_LOG_COPIED_PATH=""
+ANDROID_ADB_SERVER_LOG_COPIED_INODE=""
 ANDROID_ADB_SERVER_LOG_COPIED_OFFSET=""
 ANDROID_ADB_SERVER_LOG_COPIED_BY=""
 copy_android_adb_server_log() {
   local out_dir="$1"
   local label="$2"
   local limit=2097152
-  local adb_log size start=0 copied="last 2 MiB"
+  local adb_log size inode start=0 copied="last 2 MiB"
   local previous_offset="${ANDROID_ADB_SERVER_LOG_COPIED_OFFSET:-}"
+  local previous_inode="${ANDROID_ADB_SERVER_LOG_COPIED_INODE:-}"
   if ! adb_log=$(android_adb_server_log_path); then
     printf '== %s: host ADB server log not found\n' "$label" >>"$out_dir/adb-server.log"
     return 0
@@ -548,8 +553,12 @@ copy_android_adb_server_log() {
       >>"$out_dir/adb-server.log"
     return 0
   fi
+  # `ls -di` prints the inode first on both BSD and GNU; stat's flags differ.
+  inode=$(ls -di "$adb_log" 2>/dev/null | awk '{ print $1; exit }' || true)
+  [[ "$inode" =~ ^[0-9]+$ ]] || inode=""
   if [[ "$previous_offset" =~ ^[0-9]+$ &&
         "${ANDROID_ADB_SERVER_LOG_COPIED_PATH:-}" == "$adb_log" ]] &&
+     [[ -z "$inode" || -z "$previous_inode" || "$inode" == "$previous_inode" ]] &&
      (( previous_offset <= size )); then
     start="$previous_offset"
     copied="appended since the previous capture, ${ANDROID_ADB_SERVER_LOG_COPIED_BY:-}; earlier part in that capture's adb-server.log"
@@ -568,6 +577,7 @@ copy_android_adb_server_log() {
     fi
   } >>"$out_dir/adb-server.log" 2>&1
   ANDROID_ADB_SERVER_LOG_COPIED_PATH="$adb_log"
+  ANDROID_ADB_SERVER_LOG_COPIED_INODE="$inode"
   ANDROID_ADB_SERVER_LOG_COPIED_OFFSET="$size"
   ANDROID_ADB_SERVER_LOG_COPIED_BY="\"$label\" in ${out_dir##*/}"
   return 0
