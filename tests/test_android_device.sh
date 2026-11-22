@@ -982,6 +982,20 @@ grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/switch-order"
 [[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|' -)" == \
    '== switching emulator-5554 to 127.0.0.1:5600|== retrying the switch, which timed out above|== switching emulator-5554 to 127.0.0.1:5600|boot_id boot-a on both serials' ]]
+# The retry's budget leaves an unset ANDROID_ADB_TCP_TIMEOUT_SECONDS unset.
+reset_adb_tcp
+ADB_TCP_DEFAULT_LISTENER=1
+ADB_TCP_ALWAYS_STALE=1
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >/dev/null
+[[ "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
+unset ANDROID_ADB_TCP_TIMEOUT_SECONDS
+ADB_TCP_ALWAYS_STALE=0
+ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS=2
+retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log"
+unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS
+[[ -z "${ANDROID_ADB_TCP_TIMEOUT_SECONDS+set}" ]]
+[[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
+ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
 # Both attempts timing out keeps the emulator pipe, warns twice and never fails
 # the run.
 reset_adb_tcp
@@ -1015,7 +1029,7 @@ for bad_budget in soon 0; do
     printf 'serial=%s switch=%s\n' "$ANDROID_ADB_SERIAL" "$ANDROID_ADB_TCP_SWITCH")
   unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS ANDROID_ADB_TCP_TIMEOUT_SECONDS ANDROID_ADB_TCP_RECONNECT_SECONDS
   grep -Fxq 'serial=emulator-5554 switch=timeout' <<<"$TCP_OUTPUT"
-  grep -Fq 'invalid ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS, switch not retried' <<<"$TCP_OUTPUT"
+  grep -Eq '^::warning::adb transport: emulator pipe \(emulator-5554\); invalid ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS, switch not retried$' <<<"$TCP_OUTPUT"
   ! grep -Fq 'invalid ANDROID_ADB_TCP_PORT' <<<"$TCP_OUTPUT" || exit 1
   ! grep -q '^== retrying the switch' "$TEST_DIR/adb-transport.log" || exit 1
   [[ ! -s "$ADB_LOG" ]]
