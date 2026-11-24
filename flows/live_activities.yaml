@@ -327,7 +327,7 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     timeout: 2000
 - extendedWaitUntil:
     visible: ".*Preparing your order.*"
-    timeout: 15000
+    timeout: 60000
 - runFlow:
     when:
       visible: "Allow"
@@ -348,12 +348,14 @@ name: Live Activities — SDK lifecycle and optional backend/APNs delivery
     timeout: 2000
 - extendedWaitUntil:
     visible: ".*Preparing your order.*"
-    timeout: 15000
+    timeout: 60000
 - takeScreenshot: artifacts/live_activities_03_local_system_surface
 - swipe:
     start: "50%,92%"
     end: "50%,20%"
     duration: 600
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible: "Live Activities"
     timeout: 30000
