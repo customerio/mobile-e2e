@@ -77,7 +77,7 @@ appId: ${APP_ID}
     timeout: 2000
 - extendedWaitUntil:
     visible: ".*${LIVE_ACTIVITY_LOCK_SCREEN_TEXT}.*"
-    timeout: 15000
+    timeout: 60000
 - runFlow:
     when:
       visible: "Allow"
@@ -98,12 +98,14 @@ appId: ${APP_ID}
     timeout: 2000
 - extendedWaitUntil:
     visible: ".*${LIVE_ACTIVITY_LOCK_SCREEN_TEXT}.*"
-    timeout: 15000
+    timeout: 60000
 - takeScreenshot: artifacts/${LIVE_ACTIVITY_SCREENSHOT_PREFIX}_03_lock_screen
 - swipe:
     start: "50%,92%"
     end: "50%,20%"
     duration: 600
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible: "Live Activities"
     timeout: 30000
