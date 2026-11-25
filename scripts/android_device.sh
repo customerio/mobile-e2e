@@ -237,17 +237,17 @@ android_boot_id() {
     tr -d '\r' || true
 }
 
-# The state of guest eth0, asked through the emulator serial: the kernel's
-# operstate (up, down, ...), else up or down from `ip -o link`'s flags, else
-# unknown when neither answers.
-android_guest_eth0_state() {
-  local serial="$1" state link flags flags_re='<([^>]*)>'
-  state=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell cat /sys/class/net/eth0/operstate 2>/dev/null |
+# The state of a guest network interface (eth0 unless named), asked through
+# the emulator serial: the kernel's operstate (up, down, ...), else up or down
+# from `ip -o link`'s flags, else unknown when neither answers.
+android_guest_link_state() {
+  local serial="$1" iface="${2:-eth0}" state link flags flags_re='<([^>]*)>'
+  state=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell cat "/sys/class/net/$iface/operstate" 2>/dev/null |
     tr -d '\r' | head -n 1 || true)
   case "$state" in
     up|down|dormant|lowerlayerdown|notpresent|testing) printf '%s\n' "$state"; return 0 ;;
   esac
-  link=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell ip -o link show eth0 2>/dev/null |
+  link=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell ip -o link show "$iface" 2>/dev/null |
     tr -d '\r' || true)
   if [[ "$link" =~ $flags_re ]]; then
     flags=",${BASH_REMATCH[1]},"
@@ -264,10 +264,66 @@ android_guest_eth0_state() {
 # Wait up to N seconds for guest eth0 to read up; fails if it never does.
 android_wait_for_guest_eth0_up() {
   local serial="$1" until_at=$((SECONDS + $2))
-  while [[ "$(android_guest_eth0_state "$serial")" != up ]]; do
+  while [[ "$(android_guest_link_state "$serial")" != up ]]; do
     (( SECONDS < until_at )) || return 1
     sleep 1
   done
+}
+
+# Whether guest airplane mode reads off (settings airplane_mode_on is 0) within
+# N seconds, asked once a second.
+android_wait_for_guest_airplane_off() {
+  local serial="$1" until_at=$((SECONDS + $2))
+  while [[ "$(android_guest_airplane_mode "$serial")" != 0 ]]; do
+    (( SECONDS < until_at )) || return 1
+    sleep 1
+  done
+}
+
+android_guest_airplane_mode() {
+  android_run_until $((SECONDS + 5)) adb -s "$1" shell settings get global airplane_mode_on 2>/dev/null |
+    tr -d '\r' | head -n 1 || true
+}
+
+# Turn guest airplane mode on for 2 s and off again, at most once per job
+# (ANDROID_GUEST_AIRPLANE_TOGGLED): a toggle drops Wi-Fi with the cellular link,
+# and the retry and recovery switches run after the install, next to the flow.
+# A disable that is cut off or does not take is sent again, three times within
+# about 20 s, until airplane_mode_on reads 0. Still on, it sets
+# ANDROID_GUEST_AIRPLANE_STUCK for the switch to warn about; it never fails.
+android_toggle_guest_airplane_mode() {
+  local serial="$1" until_at try=0 value
+  ANDROID_GUEST_AIRPLANE_TOGGLED=1
+  android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode enable 2>&1 || true
+  sleep 2
+  until_at=$((SECONDS + 20))
+  while (( try < 3 )); do
+    try=$((try + 1))
+    android_run_until $((SECONDS + 5)) adb -s "$serial" shell cmd connectivity airplane-mode disable 2>&1 || true
+    if android_wait_for_guest_airplane_off "$serial" 4; then
+      printf 'airplane mode off after disable %s of 3\n' "$try"
+      return 0
+    fi
+    (( SECONDS < until_at )) || break
+  done
+  value=$(android_guest_airplane_mode "$serial")
+  if [[ "$value" == 0 ]]; then
+    printf 'airplane mode off after disable %s of 3\n' "$try"
+    return 0
+  fi
+  ANDROID_GUEST_AIRPLANE_STUCK=1
+  printf 'airplane mode still on after %s disables (airplane_mode_on=%s)\n' "$try" "${value:-unreadable}"
+}
+
+# After a toggle, wait up to 20 s for Wi-Fi (wlan0) to come back and log it: the
+# app's traffic may ride on it. A wlan0 that cannot be read is not waited for.
+android_log_guest_wifi_after_toggle() {
+  local serial="$1" started="$2" until_at=$((SECONDS + 20)) state
+  while state=$(android_guest_link_state "$serial" wlan0) && [[ "$state" != up && "$state" != unknown ]]; do
+    (( SECONDS < until_at )) || break
+    sleep 1
+  done
+  printf 'wlan0 %s after airplane toggle (+%ss)\n' "$state" $((SECONDS - started))
 }
 
 # The emulator's port redirect delivers into guest eth0, the user-mode network
@@ -276,34 +332,69 @@ android_wait_for_guest_eth0_up() {
 # data call comes up: the redirect then accepts each connect on the host and
 # nothing in the guest answers, so `adb connect` sits offline for the whole
 # budget while the emulator pipe works. Wi-Fi (wlan0) is a separate network the
-# redirect does not reach, so it is not looked at. Before dialling, an eth0 that
-# is not up gets the data call asked for (`svc data enable`), then, if it is
-# still down after 10 s, an airplane-mode toggle, which restarts telephony's
-# data setup, and 20 s more. A healthy boot costs one read; an eth0 whose state
-# cannot be read is left alone. It never fails: a link still down ends on the
-# emulator pipe as before. Writes its outcome to stdout (the transport log).
+# redirect does not reach, so it only gets logged after a toggle. Before
+# dialling, an eth0 that is not up has the radio's state logged, gets the data
+# call asked for (`svc data enable`), then, if it is still down after 30 s (a
+# late call has been seen at about 25 s), one airplane-mode toggle per job,
+# which is expected to restart telephony's data setup, and 20 s more. A healthy
+# boot costs one read; an eth0 whose state cannot be read is left alone. With
+# the second argument 1 (the ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE knob)
+# the one toggle happens first whatever eth0 reads. It never fails: a link
+# still down ends on the emulator pipe as before. Writes its outcome to stdout
+# (the transport log).
 android_bring_up_guest_data_link() {
-  local serial="$1" state
-  state=$(android_guest_eth0_state "$serial")
+  local serial="$1" force_toggle="${2:-0}" state started=$SECONDS
+  state=$(android_guest_link_state "$serial")
+  if [[ "$force_toggle" == 1 && -z "${ANDROID_GUEST_AIRPLANE_TOGGLED:-}" ]]; then
+    printf '== ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE=1: airplane toggle with eth0 %s (%s)\n' \
+      "$state" "$(date -u +%H:%M:%S)"
+    android_toggle_guest_airplane_mode "$serial"
+    if android_wait_for_guest_eth0_up "$serial" 20; then
+      printf 'eth0 up after airplane toggle (+%ss)\n' $((SECONDS - started))
+      android_log_guest_wifi_after_toggle "$serial" "$started"
+      return 0
+    fi
+    android_log_guest_wifi_after_toggle "$serial" "$started"
+    state=$(android_guest_link_state "$serial")
+  fi
   if [[ "$state" == up || "$state" == unknown ]]; then
     printf 'eth0 %s\n' "$state"
     return 0
   fi
   printf '== eth0 %s; no data call (%s)\n' "$state" "$(date -u +%H:%M:%S)"
+  printf -- '-- guest radio state with eth0 down, before data enable\n'
+  capture_android_radio_state "$serial"
   android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data enable 2>&1 || true
-  if android_wait_for_guest_eth0_up "$serial" 10; then
-    printf 'eth0 up after data enable\n'
+  if android_wait_for_guest_eth0_up "$serial" 30; then
+    printf 'eth0 up after data enable (+%ss)\n' $((SECONDS - started))
     return 0
   fi
-  android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode enable 2>&1 || true
-  sleep 2
-  android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode disable 2>&1 || true
-  if android_wait_for_guest_eth0_up "$serial" 20; then
-    printf 'eth0 up after airplane toggle\n'
-  else
-    printf 'eth0 still down (%s)\n' "$(android_guest_eth0_state "$serial")"
+  if [[ -n "${ANDROID_GUEST_AIRPLANE_TOGGLED:-}" ]]; then
+    printf 'eth0 still down after data enable (+%ss); airplane mode already toggled once this job\n' \
+      $((SECONDS - started))
+    return 0
   fi
+  printf 'eth0 still down after data enable (+%ss); toggling airplane mode\n' $((SECONDS - started))
+  android_toggle_guest_airplane_mode "$serial"
+  if android_wait_for_guest_eth0_up "$serial" 20; then
+    printf 'eth0 up after airplane toggle (+%ss)\n' $((SECONDS - started))
+  else
+    printf 'eth0 still down (%s, +%ss)\n' "$(android_guest_link_state "$serial")" $((SECONDS - started))
+  fi
+  android_log_guest_wifi_after_toggle "$serial" "$started"
   return 0
+}
+
+# A test knob's value: 1 returns 0 (on); unset or 0 returns 1 (off); anything
+# else is named in a warning (the second argument says what is left as it is)
+# and counts as off.
+android_test_knob_on() {
+  local name="$1" left="$2" value
+  value="${!name:-0}"
+  [[ "$value" != 0 ]] || return 1
+  [[ "$value" == 1 ]] && return 0
+  printf '::warning::invalid %s (%s; 1 or 0); %s\n' "$name" "$value" "$left"
+  return 1
 }
 
 # Test-only: with ANDROID_ADB_TCP_TEST_DISABLE_DATA=1, turn the guest's mobile
@@ -311,34 +402,29 @@ android_bring_up_guest_data_link() {
 # down, so a run exercises android_bring_up_guest_data_link on every job. Off
 # by default; any value other than 1 or 0 is named in a warning and ignored.
 android_disable_guest_data_for_test() {
-  local serial="$1" log="${2:-/dev/null}" value="${ANDROID_ADB_TCP_TEST_DISABLE_DATA:-0}" until_at
-  [[ "$value" != 0 ]] || return 0
-  if [[ "$value" != 1 ]]; then
-    printf '::warning::invalid ANDROID_ADB_TCP_TEST_DISABLE_DATA (%s; 1 or 0); mobile data left as it is\n' "$value"
-    return 0
-  fi
+  local serial="$1" log="${2:-/dev/null}" until_at
+  android_test_knob_on ANDROID_ADB_TCP_TEST_DISABLE_DATA 'mobile data left as it is' || return 0
   until_at=$((SECONDS + 15))
   {
     printf '== ANDROID_ADB_TCP_TEST_DISABLE_DATA=1: svc data disable (%s)\n' "$(date -u +%H:%M:%S)"
     android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data disable 2>&1 || true
-    while [[ "$(android_guest_eth0_state "$serial")" == up ]] && (( SECONDS < until_at )); do
+    while [[ "$(android_guest_link_state "$serial")" == up ]] && (( SECONDS < until_at )); do
       sleep 1
     done
-    printf 'eth0 %s after data disable\n' "$(android_guest_eth0_state "$serial")"
+    printf 'eth0 %s after data disable\n' "$(android_guest_link_state "$serial")"
   } >>"$log" 2>&1
   return 0
 }
 
-# What the guest's network and telephony say when the switch ends on the
-# emulator pipe: the links and addresses (is eth0 up, has it 10.0.2.15), the
-# modem's registration, telephony's data state, and the radio log's data-call
-# setup and teardown. Every query is time-boxed and none can fail the switch.
-capture_android_data_link_evidence() {
+# What the guest's telephony says about data: the mobile data and airplane mode
+# settings, the modem's registration, telephony's data and service state, and
+# the radio log's data-call setup and teardown. Every query is time-boxed and
+# none can fail the switch.
+capture_android_radio_state() {
   local serial="$1"
-  printf -- '-- ip -o link\n'
-  android_diagnostic 10 adb -s "$serial" shell ip -o link 2>&1
-  printf -- '-- ip -4 -o addr\n'
-  android_diagnostic 10 adb -s "$serial" shell ip -4 -o addr 2>&1
+  printf -- '-- settings mobile_data / airplane_mode_on\n'
+  android_diagnostic 5 adb -s "$serial" shell settings get global mobile_data 2>&1
+  android_diagnostic 5 adb -s "$serial" shell settings get global airplane_mode_on 2>&1
   printf -- '-- emu gsm status\n'
   android_diagnostic 10 adb -s "$serial" emu gsm status 2>&1
   printf -- '-- dumpsys telephony.registry (data and service state)\n'
@@ -348,6 +434,18 @@ capture_android_data_link_evidence() {
   android_diagnostic 15 adb -s "$serial" logcat -d -b radio 2>&1 |
     awk '/setupDataCall|DataNetwork|deactivate|RetryManager/' | tail -n 40
   return 0
+}
+
+# What the guest's network and telephony say when the switch ends on the
+# emulator pipe: the links and addresses (is eth0 up, has it 10.0.2.15), then
+# the radio state above, now after any data enable or airplane toggle.
+capture_android_data_link_evidence() {
+  local serial="$1"
+  printf -- '-- ip -o link\n'
+  android_diagnostic 10 adb -s "$serial" shell ip -o link 2>&1
+  printf -- '-- ip -4 -o addr\n'
+  android_diagnostic 10 adb -s "$serial" shell ip -4 -o addr 2>&1
+  capture_android_radio_state "$serial"
 }
 
 # Move ADB off the emulator's adb pipe and onto adbd's own TCP listener, which
@@ -371,7 +469,7 @@ use_android_adb_over_tcp() {
   # default 12 s a failed connect is redialled on the next pass.
   local reconnect_seconds="${ANDROID_ADB_TCP_RECONNECT_SECONDS:-12}"
   local tcp_serial deadline started booted tcp_port emulator_boot tcp_boot redir
-  local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0
+  local pass=0 state="" connected_at="" adbd_on_tcp=0 redirected=0 force_toggle=0
   ANDROID_EMULATOR_SERIAL="$emulator_serial"
   ANDROID_ADB_SERIAL="$emulator_serial"
   ANDROID_ADB_TCP_SWITCH=off
@@ -396,14 +494,27 @@ use_android_adb_over_tcp() {
     return 0
   fi
   tcp_serial="127.0.0.1:$host_port"
+  # The test knobs act on the first switch that runs, once per job.
+  if [[ -z "${ANDROID_GUEST_DATA_TEST_KNOBS_DONE:-}" ]]; then
+    ANDROID_GUEST_DATA_TEST_KNOBS_DONE=1
+    android_disable_guest_data_for_test "$emulator_serial" "$log"
+    if android_test_knob_on ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE 'airplane mode not forced'; then
+      force_toggle=1
+    fi
+  fi
+  ANDROID_GUEST_AIRPLANE_STUCK=""
   {
     printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
     # A reboot ends adbd's TCP listener, so a connection kept from before it
     # would only sit offline.
     android_run_until $((SECONDS + 10)) adb disconnect "$tcp_serial" 2>&1 || true
     # Outside the budget, which is for dials that can be answered.
-    android_bring_up_guest_data_link "$emulator_serial"
+    android_bring_up_guest_data_link "$emulator_serial" "$force_toggle"
   } >>"$log" 2>&1
+  if [[ -n "$ANDROID_GUEST_AIRPLANE_STUCK" ]]; then
+    printf '::warning::adb transport: guest airplane mode still on after the data link toggle (%s); Wi-Fi and mobile data may stay off\n' \
+      "$emulator_serial"
+  fi
   # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
   # so one pass that starts just before it can end about 30 s past the budget
   # at worst.

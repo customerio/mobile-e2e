@@ -104,7 +104,8 @@ usage() {
   printf '  INBOX_TRANSACTIONAL_MESSAGE_ID, ANDROID_AVD_NAME, DEVELOPER_DIR, E2E_RUN_ID,\n'
   printf '  ANDROID_ADB_TCP_PORT (host port for adb over TCP: 5600 in CI or --headless, else off; off keeps the emulator pipe),\n'
   printf '  ANDROID_ADB_TCP_TIMEOUT_SECONDS (60), ANDROID_ADB_TCP_RECONNECT_SECONDS (12), ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS (30),\n'
-  printf '  ANDROID_ADB_TCP_TEST_DISABLE_DATA (0; 1 turns mobile data off before the switch, to test bringing the guest data link up),\n'
+  printf '  ANDROID_ADB_TCP_TEST_DISABLE_DATA (0; 1 turns mobile data off before the first switch, to test bringing the guest data link up),\n'
+  printf '  ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE (0; 1 toggles airplane mode once on the first switch, to test the toggle),\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to the seeded fence: 83 on Android, 3488 on iOS)\n'
 }
@@ -715,7 +716,6 @@ run_e2e() {
   fi
   if [[ "$PLATFORM" == "android" ]]; then
     start_android_device
-    android_disable_guest_data_for_test "$ANDROID_SERIAL" "$ARTIFACT_DIR/adb-transport.log"
     use_android_adb_over_tcp "$ANDROID_SERIAL" "$ARTIFACT_DIR/adb-transport.log"
     ANDROID_SERIAL="$ANDROID_ADB_SERIAL"
     DEVICE_ID="$ANDROID_SERIAL"
