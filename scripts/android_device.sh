@@ -296,6 +296,9 @@ android_toggle_guest_airplane_mode() {
   ANDROID_GUEST_AIRPLANE_TOGGLED=1
   android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode enable 2>&1 || true
   sleep 2
+  # Read back, so a toggle whose enable never took cannot pass as one.
+  value=$(android_guest_airplane_mode "$serial")
+  printf 'airplane_mode_on=%s after enable\n' "${value:-unreadable}"
   until_at=$((SECONDS + 20))
   while (( try < 3 )); do
     try=$((try + 1))

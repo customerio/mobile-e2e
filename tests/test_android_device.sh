@@ -1360,6 +1360,7 @@ use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR
 WAITED=$(sed -nE 's/^eth0 still down after data enable \(\+([0-9]+)s\); toggling airplane mode$/\1/p' \
   "$TEST_DIR/adb-transport.log")
 (( WAITED >= 30 ))
+grep -Fxq 'airplane_mode_on=1 after enable' "$TEST_DIR/adb-transport.log"
 grep -Fxq 'airplane mode off after disable 1 of 3' "$TEST_DIR/adb-transport.log"
 grep -Eq '^eth0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
 grep -Eq '^wlan0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
