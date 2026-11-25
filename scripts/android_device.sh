@@ -268,8 +268,10 @@ android_guest_link_state() {
 # nothing in the guest answers, so `adb connect` sits offline for the whole
 # budget while the emulator pipe works. Wi-Fi (wlan0) is a separate network the
 # redirect does not reach. Before dialling, eth0 is read once; one that is down
-# has the radio's state logged, so the transport log says why telephony set up
-# no data call. Nothing is changed in the guest and nothing is waited for: the
+# has the radio's state logged, so the transport log says why telephony has no
+# data call yet (on a healthy boot whose data call is only late, this costs the
+# capture's few seconds before the dial; the capture at the pipe fallback is the
+# one that explains a bad boot). Nothing is changed in the guest and nothing is waited for: the
 # dial follows as before, and a data call that comes up late still gets TCP. An
 # eth0 whose state cannot be read is left alone. It never fails. Writes its
 # outcome to stdout (the transport log).
@@ -278,7 +280,7 @@ android_check_guest_data_link() {
   state=$(android_guest_link_state "$serial")
   printf 'eth0 %s\n' "$state"
   [[ "$state" == down ]] || return 0
-  printf '== eth0 down; no data call (%s)\n' "$(date -u +%H:%M:%S)"
+  printf '== eth0 down at switch (%s)\n' "$(date -u +%H:%M:%S)"
   printf -- '-- guest radio state with eth0 down\n'
   capture_android_radio_state "$serial"
   return 0
@@ -286,8 +288,8 @@ android_check_guest_data_link() {
 
 # What the guest's telephony says about data: the mobile data, always-on,
 # default data subscription and airplane mode settings, the modem's
-# registration, telephony's data and service state, the subscriptions and which
-# one is the default for data, and from the radio log: the network requests
+# registration, telephony's data and service state, the slot-to-subscription
+# mapping and the default data subscription (isub), and from the radio log: the network requests
 # telephony was asked for, each with whether it was passed on to data setup
 # (shouldApply, applied), PhoneSwitcher's choice of the data phone (radio and
 # main logs), and data setup: requests added, evaluations and the reasons data
@@ -304,7 +306,7 @@ capture_android_radio_state() {
   printf -- '-- dumpsys telephony.registry (data and service state)\n'
   android_diagnostic 15 adb -s "$serial" shell dumpsys telephony.registry 2>&1 |
     awk '/mDataConnectionState|mServiceState/ && n < 8 { print substr($0, 1, 600); n++ }'
-  printf -- '-- dumpsys isub (subscriptions and the default data subscription)\n'
+  printf -- '-- dumpsys isub (slot-to-subscription mapping and default data subscription)\n'
   android_diagnostic 15 adb -s "$serial" shell dumpsys isub 2>&1 |
     awk 'NR <= 40 && /[Mm]odem count|[Ss]ubId=|Loaded=|mSimState|[Ee]rror|[Ee]xception|not found|[Cc]an.t find|gave up/ { print substr($0, 1, 300) }'
   radio=$(android_diagnostic 15 adb -s "$serial" logcat -d -b radio 2>&1)

@@ -214,7 +214,7 @@ adb_tcp_listening() {
   [[ "$ADB_TCP_DEFAULT_LISTENER" -eq 1 || -f "$TEST_DIR/adb-tcpip" ]]
 }
 # Guest eth0, which the emulator's port redirect delivers into, is up unless
-# the adb-eth0 file says otherwise (wlan0 likewise, adb-wlan0); while it is down
+# the adb-eth0 file says otherwise; while it is down
 # no connect through the redirect is answered. ADB_ETH0_LATE=1 brings it up when
 # the radio log is read: a data call that comes up during the capture.
 # ADB_ETH0_IP=0 makes `ip -o link` fail. ADB_ISUB=0 makes `dumpsys isub` fail.
@@ -909,7 +909,7 @@ reset_adb_tcp() {
   rm -f "$TEST_DIR/adb-tcpip" "$TEST_DIR/adb-tcp-connected" "$TEST_DIR/adb-offline-polls" \
     "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-stale-connects" "$TEST_DIR/adb-redir" \
     "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log" \
-    "$TEST_DIR/adb-tcp-online-after" "$TEST_DIR/adb-eth0" "$TEST_DIR/adb-wlan0"
+    "$TEST_DIR/adb-tcp-online-after" "$TEST_DIR/adb-eth0"
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
@@ -1320,7 +1320,7 @@ use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
 [[ "$(eth0_calls ' shell ip -o link$')" -eq 1 ]]
 ! grep -Eq ' svc |settings put| cmd ' "$ADB_LOG" || exit 1
 grep -Fxq 'eth0 down' "$TEST_DIR/adb-transport.log"
-grep -Eq '^== eth0 down; no data call \([0-9:]+\)$' "$TEST_DIR/adb-transport.log"
+grep -Eq '^== eth0 down at switch \([0-9:]+\)$' "$TEST_DIR/adb-transport.log"
 [[ "$(grep -Fxc -- '-- guest radio state with eth0 down' "$TEST_DIR/adb-transport.log")" -eq 1 ]]
 [[ "$(eth0_calls 'logcat -d -b radio$')" -eq 1 ]]
 for query in 'settings get global multi_sim_data_call$' 'dumpsys isub$' 'logcat -d -b main$' 'logcat -d -b radio$'; do
@@ -1396,7 +1396,7 @@ ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >>"$TEST_DIR/tcp-output"
 unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS ANDROID_ADB_TCP_TIMEOUT_SECONDS
 [[ "$(grep -Fxc -- '-- guest radio state with eth0 down' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
-[[ "$(grep -Ec '^== eth0 down; no data call' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
+[[ "$(grep -Ec '^== eth0 down at switch' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
 ! grep -Eq ' svc |settings put| cmd ' "$ADB_LOG" || exit 1
 # A capture whose queries fail still ends and returns 0; what failed is logged.
 reset_adb_tcp
