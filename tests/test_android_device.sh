@@ -214,20 +214,25 @@ adb_tcp_listening() {
   [[ "$ADB_TCP_DEFAULT_LISTENER" -eq 1 || -f "$TEST_DIR/adb-tcpip" ]]
 }
 # Guest eth0, which the emulator's port redirect delivers into, is up unless
-# the adb-eth0 file says otherwise; while it is down no connect through the
-# redirect is answered. ADB_ETH0_FIX names what brings it up: data (svc data
-# enable), airplane (the airplane-mode toggle) or nothing. ADB_ETH0_SYSFS=0
-# makes operstate unreadable, and ADB_ETH0_IP=0 makes `ip` fail too.
+# the adb-eth0 file says otherwise (wlan0 likewise, adb-wlan0); while it is down
+# no connect through the redirect is answered. ADB_ETH0_FIX names what brings
+# it up: data (mobile data turned from off to on: `svc data enable` with data
+# already on changes nothing, as on a device), always-on
+# (mobile_data_always_on turned from 0 to 1) or nothing. Setting
+# mobile_data_always_on to 0 takes eth0 down and leaves Wi-Fi up.
+# ADB_ETH0_IP=0 makes `ip -o link` fail.
 ADB_ETH0_FIX=""
-ADB_ETH0_SYSFS=1
 ADB_ETH0_IP=1
 adb_eth0_state() {
   cat "$TEST_DIR/adb-${1:-eth0}" 2>/dev/null || printf '%s\n' up
 }
-# Airplane mode (adb-airplane, 0 unless set) takes eth0 and wlan0 down while
-# on. ADB_AIRPLANE_DISABLE says how `airplane-mode disable` behaves: works,
-# hang-once (the first one blocks past its cut-off and does not take) or never.
-ADB_AIRPLANE_DISABLE=works
+adb_link_line() {
+  if [[ "$(adb_eth0_state "$2")" == up ]]; then
+    printf '%s: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\\    link/ether 52:54:00:12:34:%s brd ff:ff:ff:ff:ff:ff\r\n' "$1" "$2" "$1"
+  else
+    printf '%s: %s: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000\\    link/ether 52:54:00:12:34:%s brd ff:ff:ff:ff:ff:ff\r\n' "$1" "$2" "$1"
+  fi
+}
 sleep() { :; }
 adb() {
   local polls
@@ -371,29 +376,32 @@ adb() {
     *" logcat -d -s adbd")
       for polls in $(seq 1 250); do printf 'adbd log line %s\n' "$polls"; done
       ;;
-    *" shell cat /sys/class/net/"*"/operstate")
-      polls="$*"
-      polls=${polls##*/net/}
-      polls=${polls%%/*}
-      if [[ "$ADB_ETH0_SYSFS" -eq 0 ]]; then
-        printf 'cat: /sys/class/net/%s/operstate: Permission denied\n' "$polls" >&2
+    *" shell ip -o link")
+      if [[ -n "${ADB_LINK_DUMP:-}" ]]; then
+        printf '%s\n' "$ADB_LINK_DUMP"
+        return 0
+      elif [[ "$ADB_ETH0_IP" -eq 0 ]]; then
+        printf '%s\n' 'Cannot open netlink socket: Permission denied' >&2
         return 1
       fi
-      printf '%s\r\n' "$(adb_eth0_state "$polls")"
-      ;;
-    *" shell ip -o link show "*)
-      polls="$*"
-      polls=${polls##* }
-      [[ "$ADB_ETH0_IP" -eq 1 ]] || { printf 'Device "%s" does not exist.\n' "$polls" >&2; return 1; }
-      if [[ "$(adb_eth0_state "$polls")" == up ]]; then
-        printf '2: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP\r\n' "$polls"
-      else
-        printf '2: %s: <BROADCAST,MULTICAST> mtu 1500 qdisc mq state DOWN\r\n' "$polls"
+      if [[ -f "$TEST_DIR/adb-eth0-pending" ]]; then
+        if [[ "$(<"$TEST_DIR/adb-eth0-pending")" -le 1 ]]; then
+          rm -f "$TEST_DIR/adb-eth0-pending"
+          printf '%s\n' up >"$TEST_DIR/adb-eth0"
+        else
+          printf '%s\n' $(($(<"$TEST_DIR/adb-eth0-pending") - 1)) >"$TEST_DIR/adb-eth0-pending"
+        fi
       fi
+      printf '%s\r\n' '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT'
+      printf '%s\r\n' '5: tunl0@NONE: <NOARP> mtu 1480 qdisc noop state DOWN mode DEFAULT'
+      adb_link_line 15 eth0
+      adb_link_line 16 wlan0
       ;;
     *" shell svc data enable")
+      if [[ "$ADB_ETH0_FIX" == data && "$(cat "$TEST_DIR/adb-mobile-data" 2>/dev/null || printf '%s' 1)" == 0 ]]; then
+        printf '%s\n' up >"$TEST_DIR/adb-eth0"
+      fi
       printf '%s\n' 1 >"$TEST_DIR/adb-mobile-data"
-      [[ "$ADB_ETH0_FIX" != data ]] || printf '%s\n' up >"$TEST_DIR/adb-eth0"
       ;;
     *" shell svc data disable")
       printf '%s\n' 0 >"$TEST_DIR/adb-mobile-data"
@@ -402,38 +410,37 @@ adb() {
     *" shell settings get global mobile_data")
       printf '%s\r\n' "$(cat "$TEST_DIR/adb-mobile-data" 2>/dev/null || printf '%s' 1)"
       ;;
+    *" shell settings get global mobile_data_always_on")
+      printf '%s\r\n' "$(cat "$TEST_DIR/adb-always-on" 2>/dev/null || printf '%s' 1)"
+      ;;
+    *" shell settings put global mobile_data_always_on "[01])
+      polls="$*"
+      polls=${polls##* }
+      if [[ "$polls" == 0 ]]; then
+        printf '%s\n' down >"$TEST_DIR/adb-eth0"
+        printf '%s\n' up >"$TEST_DIR/adb-wlan0"
+      elif [[ "$ADB_ETH0_FIX" == always-on && "$(cat "$TEST_DIR/adb-always-on" 2>/dev/null || printf '%s' 1)" != 1 ]]; then
+        # The data call comes up a moment later: eth0 reads up from the
+        # second link dump on.
+        printf '%s\n' 2 >"$TEST_DIR/adb-eth0-pending"
+      fi
+      printf '%s\n' "$polls" >"$TEST_DIR/adb-always-on"
+      ;;
     *" shell settings get global airplane_mode_on")
-      printf '%s\r\n' "$(cat "$TEST_DIR/adb-airplane" 2>/dev/null || printf '%s' 0)"
+      printf '%s\r\n' 0
       ;;
-    *" shell cmd connectivity airplane-mode enable")
-      adb_eth0_state >"$TEST_DIR/adb-eth0-before-airplane"
-      printf '%s\n' 1 >"$TEST_DIR/adb-airplane"
-      printf '%s\n' down >"$TEST_DIR/adb-eth0"
-      printf '%s\n' down >"$TEST_DIR/adb-wlan0"
-      ;;
-    *" shell cmd connectivity airplane-mode disable")
-      if [[ "$ADB_AIRPLANE_DISABLE" == never ]]; then
-        return 0
-      elif [[ "$ADB_AIRPLANE_DISABLE" == hang-once && ! -f "$TEST_DIR/adb-airplane-hung" ]]; then
-        : >"$TEST_DIR/adb-airplane-hung"
-        command sleep 8 </dev/null >/dev/null 2>&1
-        return 0
-      fi
-      printf '%s\n' 0 >"$TEST_DIR/adb-airplane"
-      printf '%s\n' up >"$TEST_DIR/adb-wlan0"
-      if [[ "$ADB_ETH0_FIX" == airplane || "$(cat "$TEST_DIR/adb-eth0-before-airplane")" == up ]]; then
-        printf '%s\n' up >"$TEST_DIR/adb-eth0"
-      fi
-      ;;
-    *" shell ip -o link") printf '%s\n' '1: lo: <LOOPBACK,UP,LOWER_UP>' '2: eth0: <BROADCAST,MULTICAST> state DOWN' ;;
     *" shell ip -4 -o addr") printf '%s\n' '1: lo    inet 127.0.0.1/8 scope host lo' ;;
     *" emu gsm status") printf '%s\n' 'gsm voice state: home' 'gsm data state:  home' OK ;;
     *" shell dumpsys telephony.registry")
       printf '%s\n' '  mCallState=0' '  mDataConnectionState=0' '  mServiceState=Voice: IN_SERVICE'
       ;;
     *" logcat -d -b radio")
-      printf '%s\n' 'D RILJ : [UNSL]< UNSOL_SIGNAL_STRENGTH' 'D RILJ : > SETUP_DATA_CALL' \
-        'D DataNetwork-1: setupDataCall: failed' 'D RetryManager: next retry in 60000ms'
+      printf '%s\n' 'D RILJ : [UNSL]< UNSOL_SIGNAL_STRENGTH' 'D RILJ : [0451]> SETUP_DATA_CALL' \
+        'D DataNetwork-1: setupDataCall: failed' 'D RetryManager: next retry in 60000ms' \
+        'D TelephonyNetworkFactory[0]: onNeedNetworkFor [NetworkRequest [ REQUEST id=114, [ Transports: CELLULAR ] ], mAttachedDataNetwork=null' \
+        'D DNC-0   : Data evaluation: evaluation reason:NEW_REQUEST, Data disallowed reasons: RETRY_SCHEDULED, candidate profile=null' \
+        'D DNC-0   : Data evaluation: evaluation reason:DATA_RETRY, Data allowed reason: NORMAL, candidate profile=internet' \
+        'D SST     : [0] Poll ServiceState done'
       ;;
     *) return 64 ;;
   esac
@@ -918,8 +925,7 @@ reset_adb_tcp() {
     "$TEST_DIR/adb-tcp-registered" "$TEST_DIR/adb-tcp-stale-connects" "$TEST_DIR/adb-redir" \
     "$TEST_DIR/adb-redir-refusals" "$TEST_DIR/adb-tcp-booting" "$TEST_DIR/adb-transport.log" \
     "$TEST_DIR/adb-tcp-online-after" "$TEST_DIR/adb-eth0" "$TEST_DIR/adb-wlan0" \
-    "$TEST_DIR/adb-airplane" "$TEST_DIR/adb-airplane-hung" "$TEST_DIR/adb-eth0-before-airplane" \
-    "$TEST_DIR/adb-mobile-data"
+    "$TEST_DIR/adb-mobile-data" "$TEST_DIR/adb-always-on" "$TEST_DIR/adb-eth0-pending"
   : >"$ADB_LOG"
   NOTES=""
   ADB_TCP_ANSWERS=1
@@ -929,11 +935,9 @@ reset_adb_tcp() {
   ADB_STATE="device"
   ADB_BOOTED="1"
   ADB_ETH0_FIX=""
-  ADB_ETH0_SYSFS=1
   ADB_ETH0_IP=1
-  ADB_AIRPLANE_DISABLE=works
   unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL ANDROID_ADB_TCP_SWITCH E2E_DEVICE_ID \
-    ANDROID_GUEST_AIRPLANE_TOGGLED ANDROID_GUEST_AIRPLANE_STUCK ANDROID_GUEST_DATA_TEST_KNOBS_DONE
+    ANDROID_GUEST_DATA_TEST_KNOBS_DONE
 }
 # TCP is on by default in CI and headless runs; these tests run as headless.
 HEADLESS=1
@@ -948,11 +952,12 @@ grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -Fq 'connected to 127.0.0.1:5600' "$TEST_DIR/adb-transport.log"
 grep -Fxq 'boot_id boot-a on both serials' "$TEST_DIR/adb-transport.log"
 grep -Eq '^pass 1 \+[0-9]+s: device$' "$TEST_DIR/adb-transport.log"
-# A boot whose eth0 is up costs one read before the dial, and the radio and
-# Wi-Fi are left alone.
-[[ "$(grep -c '/sys/class/net/eth0/operstate\| ip ' "$ADB_LOG")" -eq 1 ]]
-[[ "$(grep -n 'eth0/operstate' "$ADB_LOG" | cut -d: -f1)" -lt "$(grep -nx 'connect 127.0.0.1:5600' "$ADB_LOG" | cut -d: -f1)" ]]
-! grep -Eq ' svc | cmd | settings |wifi|wlan0' "$ADB_LOG" || exit 1
+# A boot whose eth0 is up costs two reads before the dial (the always-on
+# setting and one link dump), and the radio and Wi-Fi are left alone.
+[[ "$(grep -c ' ip ' "$ADB_LOG")" -eq 1 ]]
+[[ "$(grep -nx -- '-s emulator-5554 shell ip -o link' "$ADB_LOG" | cut -d: -f1)" -lt "$(grep -nx 'connect 127.0.0.1:5600' "$ADB_LOG" | cut -d: -f1)" ]]
+[[ "$(grep -E ' svc | cmd | settings ' "$ADB_LOG")" == '-s emulator-5554 shell settings get global mobile_data_always_on' ]]
+grep -Fxq 'mobile_data_always_on=1' "$TEST_DIR/adb-transport.log"
 grep -Fxq 'eth0 up' "$TEST_DIR/adb-transport.log"
 # Once adbd listens on TCP, a second switch does not restart it again, and the
 # emulator's existing redirect is used as it is.
@@ -1088,7 +1093,7 @@ unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS
 [[ "$ANDROID_EMULATOR_SERIAL" == "emulator-5554" ]]
 [[ "$ANDROID_ADB_TCP_SWITCH" == tcp-after-retry ]]
 # The retry checks eth0 before it dials, as the first switch did.
-[[ "$(grep -Fxc -- '-s emulator-5554 shell cat /sys/class/net/eth0/operstate' "$ADB_LOG")" -eq 2 ]]
+[[ "$(grep -Fxc 'eth0 up' "$TEST_DIR/adb-transport.log")" -eq 2 ]]
 grep -Fq 'adb transport: tcp (127.0.0.1:5600' <<<"$NOTES"
 grep -E '^== (switching|retrying)|^boot_id' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/switch-order"
 [[ "$(sed -E 's/ \([0-9:]+\)$//' "$TEST_DIR/switch-order" | paste -sd '|' -)" == \
@@ -1319,145 +1324,134 @@ unset ANDROID_ADB_SERIAL ANDROID_EMULATOR_SERIAL E2E_DEVICE_ID
 sleep() { SECONDS=$((SECONDS + 5)); }
 eth0_calls() { grep -Ec -- "$1" "$ADB_LOG" || true; }
 first_line() { grep -n -- "$1" "$2" | head -n 1 | cut -d: -f1; }
-# Asking for the data call is enough: no airplane toggle. The radio's state is
-# logged first, before the data enable changes it.
+# Mobile data already on: `svc data enable` alone would change nothing, so data
+# goes off and on again, which restarts the data setup. The radio's state is
+# logged first, before the reset changes it.
+reset_adb_tcp
+printf '%s\n' down >"$TEST_DIR/adb-eth0"
+ADB_ETH0_FIX=data
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" && "$ANDROID_ADB_TCP_SWITCH" == tcp ]]
+[[ "$(grep -E ' svc ' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == 'disable enable' ]]
+! grep -Fq 'settings put' "$ADB_LOG" || exit 1
+grep -Eq '^== eth0 down; no data call \([0-9:]+\)$' "$TEST_DIR/adb-transport.log"
+grep -Eq '^eth0 up after data reset \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+[[ "$(first_line 'svc data enable' "$ADB_LOG")" -lt "$(first_line '^connect 127.0.0.1:5600$' "$ADB_LOG")" ]]
+[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
+for query in 'settings get global mobile_data_always_on$' 'settings get global airplane_mode_on$' \
+             'emu gsm status$' 'dumpsys telephony.registry$' 'logcat -d -b radio$'; do
+  [[ "$(first_line "$query" "$ADB_LOG")" -lt "$(first_line 'svc data disable' "$ADB_LOG")" ]]
+done
+sed -n '/^-- guest radio state with eth0 down, before the data reset$/,/^eth0 up after data reset/p' \
+  "$TEST_DIR/adb-transport.log" >"$TEST_DIR/evidence"
+[[ "$(sed -n '/^-- settings mobile_data/{n;p;n;p;n;p;}' "$TEST_DIR/evidence" | tr -d '\r' | paste -sd ' ' -)" == '1 1 0' ]]
+grep -Fxq 'gsm data state:  home' "$TEST_DIR/evidence"
+grep -Fxq '  mDataConnectionState=0' "$TEST_DIR/evidence"
+sed -n '/^-- logcat radio (network requests/,/^-- logcat radio (data setup/p' "$TEST_DIR/evidence" >"$TEST_DIR/requests"
+grep -Fq 'REQUEST id=114, [ Transports: CELLULAR ]' "$TEST_DIR/requests"
+! grep -Fq 'SETUP_DATA_CALL' "$TEST_DIR/requests" || exit 1
+sed -n '/^-- logcat radio (data setup/,$p' "$TEST_DIR/evidence" >"$TEST_DIR/setup"
+grep -Fxq 'D DNC-0   : Data evaluation: evaluation reason:NEW_REQUEST, Data disallowed reasons: RETRY_SCHEDULED, candidate profile=null' \
+  "$TEST_DIR/setup"
+grep -Fxq 'D RILJ : [0451]> SETUP_DATA_CALL' "$TEST_DIR/setup"
+grep -Fxq 'D DNC-0   : Data evaluation: evaluation reason:DATA_RETRY, Data allowed reason: NORMAL, candidate profile=internet' \
+  "$TEST_DIR/setup"
+grep -Fxq 'D DataNetwork-1: setupDataCall: failed' "$TEST_DIR/setup"
+grep -Fxq 'D RetryManager: next retry in 60000ms' "$TEST_DIR/setup"
+! grep -Fq 'TelephonyNetworkFactory' "$TEST_DIR/setup" || exit 1
+! grep -Eq 'mCallState|SIGNAL_STRENGTH|Poll ServiceState' "$TEST_DIR/evidence" || exit 1
+# Mobile data off: turning it on is the reset, with no disable first.
 reset_adb_tcp
 printf '%s\n' down >"$TEST_DIR/adb-eth0"
 printf '%s\n' 0 >"$TEST_DIR/adb-mobile-data"
 ADB_ETH0_FIX=data
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
-[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" && "$ANDROID_ADB_TCP_SWITCH" == tcp ]]
-[[ "$(eth0_calls '^-s emulator-5554 shell svc data enable$')" -eq 1 ]]
-[[ "$(eth0_calls 'airplane-mode')" -eq 0 ]]
-[[ -z "${ANDROID_GUEST_AIRPLANE_TOGGLED:-}" ]]
-grep -Eq '^== eth0 down; no data call \([0-9:]+\)$' "$TEST_DIR/adb-transport.log"
-grep -Eq '^eth0 up after data enable \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-[[ "$(first_line 'svc data enable' "$ADB_LOG")" -lt "$(first_line '^connect 127.0.0.1:5600$' "$ADB_LOG")" ]]
-[[ "$(grep -Fxc 'connect 127.0.0.1:5600' "$ADB_LOG")" -eq 1 ]]
-for query in 'settings get global mobile_data$' 'settings get global airplane_mode_on$' \
-             'emu gsm status$' 'dumpsys telephony.registry$' 'logcat -d -b radio$'; do
-  [[ "$(first_line "$query" "$ADB_LOG")" -lt "$(first_line 'svc data enable' "$ADB_LOG")" ]]
-done
-sed -n '/^-- guest radio state with eth0 down, before data enable$/,/^eth0 up after data enable/p' \
-  "$TEST_DIR/adb-transport.log" >"$TEST_DIR/evidence"
-[[ "$(sed -n '/^-- settings mobile_data/{n;p;}' "$TEST_DIR/evidence" | tr -d '\r')" == 0 ]]
-grep -Fxq 'gsm data state:  home' "$TEST_DIR/evidence"
-grep -Fxq '  mDataConnectionState=0' "$TEST_DIR/evidence"
-grep -Fxq 'D DataNetwork-1: setupDataCall: failed' "$TEST_DIR/evidence"
-! grep -Eq 'mCallState|SIGNAL_STRENGTH' "$TEST_DIR/evidence" || exit 1
-# A data call that only comes back after an airplane-mode toggle: 30 s after the
-# data enable, toggled once, on then off, airplane mode checked off and Wi-Fi
-# back, then TCP.
-reset_adb_tcp
-printf '%s\n' down >"$TEST_DIR/adb-eth0"
-ADB_ETH0_FIX=airplane
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
 [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
-[[ "$(eth0_calls 'svc data enable$')" -eq 1 ]]
-[[ "$(grep -E 'airplane-mode' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == 'enable disable' ]]
-[[ "$ANDROID_GUEST_AIRPLANE_TOGGLED" == 1 ]]
-[[ ! -s "$TEST_DIR/tcp-output" ]]
-WAITED=$(sed -nE 's/^eth0 still down after data enable \(\+([0-9]+)s\); toggling airplane mode$/\1/p' \
-  "$TEST_DIR/adb-transport.log")
-(( WAITED >= 30 ))
-grep -Fxq 'airplane_mode_on=1 after enable' "$TEST_DIR/adb-transport.log"
-grep -Fxq 'airplane mode off after disable 1 of 3' "$TEST_DIR/adb-transport.log"
-grep -Eq '^eth0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-grep -Eq '^wlan0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-# airplane_mode_on is read after the disable to check it took.
-awk '/airplane-mode disable$/ { d = NR } d && /settings get global airplane_mode_on$/ { r = 1 } END { exit !r }' "$ADB_LOG"
-# A disable that is cut off is sent again and the second one takes.
+[[ "$(grep -E ' svc ' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == enable ]]
+grep -Eq '^eth0 up after data reset \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+# mobile_data_always_on found off is set to 1 before eth0 is read; a link it
+# brings back up needs no data reset.
 reset_adb_tcp
 printf '%s\n' down >"$TEST_DIR/adb-eth0"
-ADB_ETH0_FIX=airplane
-ADB_AIRPLANE_DISABLE=hang-once
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
-[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" && -z "$ANDROID_GUEST_AIRPLANE_STUCK" ]]
-[[ "$(eth0_calls 'airplane-mode disable$')" -eq 2 ]]
-grep -Fxq 'airplane mode off after disable 2 of 3' "$TEST_DIR/adb-transport.log"
-[[ ! -s "$TEST_DIR/tcp-output" ]]
-# A disable that never takes is sent three times within about 20 s, then named
-# in a warning and the log; the switch still ends without failing the run.
+printf '%s\n' 0 >"$TEST_DIR/adb-always-on"
+ADB_ETH0_FIX=always-on
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(eth0_calls 'settings put global mobile_data_always_on 1$')" -eq 1 && "$(eth0_calls ' svc ')" -eq 0 ]]
+[[ "$(first_line 'mobile_data_always_on 1$' "$ADB_LOG")" -lt "$(first_line ' shell ip -o link$' "$ADB_LOG")" ]]
+grep -Fxq 'mobile_data_always_on=0, set to 1' "$TEST_DIR/adb-transport.log"
+grep -Eq '^eth0 up after mobile_data_always_on=1 \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+# An unset always-on (null) is set too; an eth0 already up is not touched.
+reset_adb_tcp
+printf '%s\n' null >"$TEST_DIR/adb-always-on"
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+grep -Fxq 'mobile_data_always_on=null, set to 1' "$TEST_DIR/adb-transport.log"
+grep -Fxq 'eth0 up' "$TEST_DIR/adb-transport.log"
+[[ "$(eth0_calls ' svc |radio')" -eq 0 ]]
+# A link that never comes up is bounded, ends on the emulator pipe without
+# failing the run, and leaves the guest's network and radio state in the log,
+# before the data reset and again at the fallback.
 reset_adb_tcp
 printf '%s\n' down >"$TEST_DIR/adb-eth0"
-ADB_ETH0_FIX=airplane
-ADB_AIRPLANE_DISABLE=never
 ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
 STARTED_AT=$SECONDS
 # In this shell, not $(...), so errexit would stop the test on any failure.
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
 unset ANDROID_ADB_TCP_TIMEOUT_SECONDS
 [[ "$ANDROID_ADB_SERIAL" == emulator-5554 && "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
-[[ "$(eth0_calls 'airplane-mode disable$')" -eq 3 ]]
-grep -Fxq 'airplane mode still on after 3 disables (airplane_mode_on=1)' "$TEST_DIR/adb-transport.log"
-grep -Exq '::warning::adb transport: guest airplane mode still on after the data link toggle \(emulator-5554\); Wi-Fi and mobile data may stay off' \
-  "$TEST_DIR/tcp-output"
-grep -Eq '^wlan0 down after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-sed -n '/^-- guest data link at fallback/,$p' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/evidence"
-[[ "$(sed -n '/^-- settings mobile_data/{n;n;p;}' "$TEST_DIR/evidence" | tr -d '\r')" == 1 ]]
-# 3 disables, each with a 4 s check, overshooting by one 5 s sleep each here.
-(( SECONDS - STARTED_AT <= 150 ))
-# A link that never comes up is bounded, ends on the emulator pipe without
-# failing the run, and leaves the guest's network and radio state in the log,
-# before the data enable and again at the fallback.
-reset_adb_tcp
-printf '%s\n' down >"$TEST_DIR/adb-eth0"
-ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
-STARTED_AT=$SECONDS
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
-unset ANDROID_ADB_TCP_TIMEOUT_SECONDS
-[[ "$ANDROID_ADB_SERIAL" == emulator-5554 && "$ANDROID_ADB_TCP_SWITCH" == timeout ]]
 [[ "$(grep -Ec '^::warning::' "$TEST_DIR/tcp-output")" -eq 1 ]]
 grep -Eq '^::warning::adb transport: emulator pipe' "$TEST_DIR/tcp-output"
-[[ "$(eth0_calls 'airplane-mode enable$')" -eq 1 ]]
-grep -Eq '^eth0 still down \(down, \+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-[[ "$(grep -Fxc -- '-- guest radio state with eth0 down, before data enable' "$TEST_DIR/adb-transport.log")" -eq 1 ]]
-TRANSPORT_LOG="$TEST_DIR/adb-transport.log"
-sed -n '/^-- guest data link at fallback/,$p' "$TRANSPORT_LOG" >"$TEST_DIR/evidence"
-grep -Fxq '2: eth0: <BROADCAST,MULTICAST> state DOWN' "$TEST_DIR/evidence"
+WAITED=$(sed -nE 's/^eth0 still down after data reset \(down, \+([0-9]+)s\)$/\1/p' "$TEST_DIR/adb-transport.log")
+(( WAITED >= 30 ))
+[[ "$(grep -Fxc -- '-- guest radio state with eth0 down, before the data reset' "$TEST_DIR/adb-transport.log")" -eq 1 ]]
+sed -n '/^-- guest data link at fallback/,$p' "$TEST_DIR/adb-transport.log" >"$TEST_DIR/evidence"
+grep -q '^15: eth0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN ' "$TEST_DIR/evidence"
 grep -Fxq '1: lo    inet 127.0.0.1/8 scope host lo' "$TEST_DIR/evidence"
-grep -Fxq -- '-- settings mobile_data / airplane_mode_on' "$TEST_DIR/evidence"
+grep -Fxq -- '-- settings mobile_data / mobile_data_always_on / airplane_mode_on' "$TEST_DIR/evidence"
 grep -Fxq 'gsm data state:  home' "$TEST_DIR/evidence"
-grep -Fxq '  mDataConnectionState=0' "$TEST_DIR/evidence"
 grep -Fxq '  mServiceState=Voice: IN_SERVICE' "$TEST_DIR/evidence"
-grep -Fxq 'D DataNetwork-1: setupDataCall: failed' "$TEST_DIR/evidence"
-grep -Fxq 'D RetryManager: next retry in 60000ms' "$TEST_DIR/evidence"
-! grep -Eq 'mCallState|SIGNAL_STRENGTH' "$TEST_DIR/evidence" || exit 1
+grep -Fxq 'D DNC-0   : Data evaluation: evaluation reason:NEW_REQUEST, Data disallowed reasons: RETRY_SCHEDULED, candidate profile=null' \
+  "$TEST_DIR/evidence"
 awk '/^connect 127/ { c = NR } /^disconnect 127/ { d = NR } END { exit !(d > c) }' "$ADB_LOG"
-# 30 s for data enable, 2 s in airplane mode, its check, 20 s for eth0, 20 s
-# for wlan0 and the 1 s budget, each wait overshooting by one 5 s sleep here.
-(( SECONDS - STARTED_AT <= 110 ))
-# The retry after the build and the switch after a recovery reboot ask for the
-# data call again but never toggle airplane mode a second time in the job.
+# 30 s for eth0 after the reset, its 1 s pause and the 1 s budget, each wait
+# overshooting by one 5 s sleep here.
+(( SECONDS - STARTED_AT <= 60 ))
+# The retry after the build and the switch after a recovery reboot reset the
+# data setup again before they dial.
 ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS=1
 retry_android_adb_over_tcp_after_timeout "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
 ANDROID_ADB_TCP_TIMEOUT_SECONDS=1
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >>"$TEST_DIR/tcp-output"
 unset ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS ANDROID_ADB_TCP_TIMEOUT_SECONDS
-[[ "$(eth0_calls 'svc data enable$')" -eq 3 ]]
-[[ "$(eth0_calls 'airplane-mode enable$')" -eq 1 ]]
-[[ "$(grep -Ec '^eth0 still down after data enable \(\+[0-9]+s\); airplane mode already toggled once this job$' \
-  "$TEST_DIR/adb-transport.log")" -eq 2 ]]
-# An eth0 whose state cannot be read is left alone; `ip -o link` stands in for
-# an unreadable operstate, its flags deciding up or down.
-for eth0_case in 'unknown 0' 'up 1' 'down 1'; do
+[[ "$(eth0_calls 'svc data disable$')" -eq 3 && "$(eth0_calls 'svc data enable$')" -eq 3 ]]
+[[ "$(grep -Ec '^eth0 still down after data reset' "$TEST_DIR/adb-transport.log")" -eq 3 ]]
+# An eth0 the link dump has no line for is left alone, and what the dump
+# returned goes in the log.
+reset_adb_tcp
+ADB_ETH0_IP=0
+ADB_ETH0_FIX=data
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
+[[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+grep -Fxq 'eth0 unknown' "$TEST_DIR/adb-transport.log"
+grep -Fxq 'eth0 unreadable from ip -o link: Cannot open netlink socket: Permission denied' "$TEST_DIR/adb-transport.log"
+! grep -Eq ' svc |settings put' "$ADB_LOG" || exit 1
+# The dump's line for the interface decides: UP and LOWER_UP with a state that
+# is not DOWN is up; an `@` suffix names the same interface; a longer name does not.
+for link_case in \
+  'up|eth0|2: eth0@if5: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT' \
+  'down|eth0|2: eth0: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc mq state UNKNOWN mode DEFAULT' \
+  'down|eth0|2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state DOWN' \
+  'unknown|eth0|3: eth00: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP mode DEFAULT' \
+  'up|wlan0|16: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DORMANT'; do
+  IFS='|' read -r link_want link_iface link_line <<<"$link_case"
   reset_adb_tcp
-  ADB_ETH0_SYSFS=0
-  ADB_ETH0_IP=${eth0_case#* }
-  ADB_ETH0_FIX=data
-  [[ "${eth0_case% *}" != down ]] || printf '%s\n' down >"$TEST_DIR/adb-eth0"
-  use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log"
-  [[ "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
-  if [[ "${eth0_case% *}" == down ]]; then
-    grep -Eq '^== eth0 down; no data call' "$TEST_DIR/adb-transport.log"
-    [[ "$(eth0_calls 'svc data enable$')" -eq 1 ]]
-  else
-    grep -Fxq "eth0 ${eth0_case% *}" "$TEST_DIR/adb-transport.log"
-    ! grep -Eq ' svc | cmd | settings ' "$ADB_LOG" || exit 1
-  fi
+  ADB_LINK_DUMP="1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN"$'\r\n'"$link_line"$'\r'
+  [[ "$(android_guest_link_state emulator-5554 "$link_iface" 2>/dev/null)" == "$link_want" ]]
+  unset ADB_LINK_DUMP
 done
-# The test knob turns mobile data off before the first switch that runs, which
-# then brings it back; a later switch leaves it alone.
+# The data-off knob turns mobile data off before the first switch that runs and
+# logs what it did; the switch turns data back on (no disable, it is off); a
+# later switch leaves it alone.
 reset_adb_tcp
 ADB_ETH0_FIX=data
 ANDROID_ADB_TCP_TEST_DISABLE_DATA=1
@@ -1465,60 +1459,63 @@ use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR
 use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >>"$TEST_DIR/tcp-output"
 unset ANDROID_ADB_TCP_TEST_DISABLE_DATA
 [[ ! -s "$TEST_DIR/tcp-output" && "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
-[[ "$(eth0_calls 'svc data disable$')" -eq 1 && "$(eth0_calls 'svc data enable$')" -eq 1 ]]
-[[ "$(first_line 'svc data disable' "$ADB_LOG")" -lt "$(first_line 'svc data enable' "$ADB_LOG")" ]]
+[[ "$(grep -E ' svc ' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == 'disable enable' ]]
 grep -Eq '^== ANDROID_ADB_TCP_TEST_DISABLE_DATA=1: svc data disable' "$TEST_DIR/adb-transport.log"
-grep -Fxq 'eth0 down after data disable' "$TEST_DIR/adb-transport.log"
-grep -Eq '^eth0 up after data enable \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+grep -q '^mobile_data=0, eth0 down after data disable: 15: eth0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN ' \
+  "$TEST_DIR/adb-transport.log"
+grep -Eq '^eth0 up after data reset \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+# The drop knob sets mobile_data_always_on to 0 before the first switch that
+# runs and waits for eth0 down with Wi-Fi up; the switch sets it back to 1,
+# which brings eth0 up; a later switch leaves both alone.
+reset_adb_tcp
+ADB_ETH0_FIX=always-on
+ANDROID_ADB_TCP_TEST_DROP_DATA=1
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
+use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >>"$TEST_DIR/tcp-output"
+unset ANDROID_ADB_TCP_TEST_DROP_DATA
+[[ ! -s "$TEST_DIR/tcp-output" && "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
+[[ "$(grep -E 'settings put' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == '0 1' ]]
+[[ "$(eth0_calls ' svc ')" -eq 0 ]]
+grep -Eq '^== ANDROID_ADB_TCP_TEST_DROP_DATA=1: mobile_data_always_on 0 \([0-9:]+\)$' "$TEST_DIR/adb-transport.log"
+grep -Fxq 'mobile_data_always_on=1, set to 0' "$TEST_DIR/adb-transport.log"
+# It stops waiting once eth0 is down with Wi-Fi up (at once here), not at 60 s.
+grep -Eq '^after [0-9]s: 15: eth0: <BROADCAST,MULTICAST> .* / 16: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> ' \
+  "$TEST_DIR/adb-transport.log"
+grep -Fxq 'mobile_data_always_on=0, set to 1' "$TEST_DIR/adb-transport.log"
+grep -Eq '^eth0 up after mobile_data_always_on=1 \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
+[[ "$(first_line 'mobile_data_always_on 1$' "$ADB_LOG")" -lt "$(first_line '^connect 127.0.0.1:5600$' "$ADB_LOG")" ]]
 # Neither knob touches the guest when the switch does not run (turned off or
-# misconfigured), so a local AVD keeps its mobile data and airplane mode.
+# misconfigured), so a local AVD keeps its settings.
 for port in off 5555; do
   reset_adb_tcp
   ANDROID_ADB_TCP_PORT=$port
   ANDROID_ADB_TCP_TEST_DISABLE_DATA=1
-  ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE=1
+  ANDROID_ADB_TCP_TEST_DROP_DATA=1
   use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
-  unset ANDROID_ADB_TCP_PORT ANDROID_ADB_TCP_TEST_DISABLE_DATA ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE
+  unset ANDROID_ADB_TCP_PORT ANDROID_ADB_TCP_TEST_DISABLE_DATA ANDROID_ADB_TCP_TEST_DROP_DATA
   [[ "$ANDROID_ADB_TCP_SWITCH" == off ]]
-  ! grep -Eq ' svc | cmd ' "$ADB_LOG" || exit 1
+  ! grep -Eq ' svc | cmd | settings ' "$ADB_LOG" || exit 1
   [[ -z "${ANDROID_GUEST_DATA_TEST_KNOBS_DONE:-}" ]]
 done
-for knob in unset 0 yes; do
-  reset_adb_tcp
-  [[ "$knob" == unset ]] || ANDROID_ADB_TCP_TEST_DISABLE_DATA=$knob
-  KNOB_OUTPUT=$(android_disable_guest_data_for_test emulator-5554 "$TEST_DIR/adb-transport.log")
-  unset ANDROID_ADB_TCP_TEST_DISABLE_DATA
-  [[ ! -s "$ADB_LOG" && ! -s "$TEST_DIR/adb-transport.log" ]]
-  if [[ "$knob" == yes ]]; then
-    grep -Fxq '::warning::invalid ANDROID_ADB_TCP_TEST_DISABLE_DATA (yes; 1 or 0); mobile data left as it is' <<<"$KNOB_OUTPUT"
-  else
-    [[ -z "$KNOB_OUTPUT" ]]
-  fi
+for knob in 'DISABLE_DATA android_disable_guest_data_for_test mobile data left as it is' \
+            'DROP_DATA android_drop_guest_data_for_test mobile_data_always_on left as it is'; do
+  knob_name=ANDROID_ADB_TCP_TEST_${knob%% *}
+  knob_fn=${knob#* }
+  knob_left=${knob_fn#* }
+  knob_fn=${knob_fn%% *}
+  for value in unset 0 yes; do
+    reset_adb_tcp
+    [[ "$value" == unset ]] || export "$knob_name=$value"
+    KNOB_OUTPUT=$("$knob_fn" emulator-5554 "$TEST_DIR/adb-transport.log")
+    unset "$knob_name"
+    [[ ! -s "$ADB_LOG" && ! -s "$TEST_DIR/adb-transport.log" ]]
+    if [[ "$value" == yes ]]; then
+      grep -Fxq "::warning::invalid $knob_name (yes; 1 or 0); $knob_left" <<<"$KNOB_OUTPUT"
+    else
+      [[ -z "$KNOB_OUTPUT" ]]
+    fi
+  done
 done
-# The forced-toggle knob toggles airplane mode exactly once, on the first
-# switch, with eth0 up, checks it off and waits for eth0 and Wi-Fi; it asks for
-# no data call.
-reset_adb_tcp
-ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE=1
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >>"$TEST_DIR/tcp-output"
-unset ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE
-[[ ! -s "$TEST_DIR/tcp-output" && "$ANDROID_ADB_SERIAL" == "127.0.0.1:5600" ]]
-[[ "$(grep -E 'airplane-mode' "$ADB_LOG" | sed 's/.* //' | paste -sd ' ' -)" == 'enable disable' ]]
-[[ "$(eth0_calls ' svc ')" -eq 0 ]]
-grep -Eq '^== ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE=1: airplane toggle with eth0 up \([0-9:]+\)$' \
-  "$TEST_DIR/adb-transport.log"
-grep -Fxq 'airplane mode off after disable 1 of 3' "$TEST_DIR/adb-transport.log"
-grep -Eq '^eth0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-grep -Eq '^wlan0 up after airplane toggle \(\+[0-9]+s\)$' "$TEST_DIR/adb-transport.log"
-[[ "$(first_line 'airplane-mode enable' "$ADB_LOG")" -lt "$(first_line '^connect 127.0.0.1:5600$' "$ADB_LOG")" ]]
-reset_adb_tcp
-ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE=on
-use_android_adb_over_tcp emulator-5554 "$TEST_DIR/adb-transport.log" >"$TEST_DIR/tcp-output"
-unset ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE
-grep -Fxq '::warning::invalid ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE (on; 1 or 0); airplane mode not forced' \
-  "$TEST_DIR/tcp-output"
-[[ "$(grep -c '' "$TEST_DIR/tcp-output")" -eq 1 && "$(eth0_calls 'airplane-mode')" -eq 0 ]]
 sleep() { :; }
 unset -f eth0_calls first_line
 

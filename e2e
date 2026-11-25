@@ -105,7 +105,7 @@ usage() {
   printf '  ANDROID_ADB_TCP_PORT (host port for adb over TCP: 5600 in CI or --headless, else off; off keeps the emulator pipe),\n'
   printf '  ANDROID_ADB_TCP_TIMEOUT_SECONDS (60), ANDROID_ADB_TCP_RECONNECT_SECONDS (12), ANDROID_ADB_TCP_RETRY_TIMEOUT_SECONDS (30),\n'
   printf '  ANDROID_ADB_TCP_TEST_DISABLE_DATA (0; 1 turns mobile data off before the first switch, to test bringing the guest data link up),\n'
-  printf '  ANDROID_ADB_TCP_TEST_FORCE_AIRPLANE_TOGGLE (0; 1 toggles airplane mode once on the first switch, to test the toggle),\n'
+  printf '  ANDROID_ADB_TCP_TEST_DROP_DATA (0; 1 sets mobile_data_always_on to 0 before the first switch, to test a boot with no data call),\n'
   printf '  GEOFENCE_OUTSIDE_LATITUDE/LONGITUDE, GEOFENCE_INSIDE_LATITUDE/LONGITUDE, GEOFENCE_ID\n'
   printf '  (GEOFENCE_ID defaults to the seeded fence: 83 on Android, 3488 on iOS)\n'
 }
