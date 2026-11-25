@@ -36,11 +36,36 @@ name: Message Inbox — backend, startup hydration, SDK data API, visual present
 - tapOn:
     id: "first_name_input"
 - inputText: "Maestro Inbox Tester"
-- hideKeyboard
+# On iOS, dismiss the keyboard with a tap on the login screen's empty band
+# under the title: the sample's view controllers end editing on a background
+# tap. Maestro's iOS hideKeyboard swipes, then polls the view hierarchy for
+# 5-17s, and a driver restart during one of those polls has failed the run.
+# Android keeps the native keyboard command.
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          point: "50%,25%"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn:
     id: "email_input"
 - inputText: ${output.email}
-- hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          point: "50%,25%"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn:
     id: "login_button"
 
