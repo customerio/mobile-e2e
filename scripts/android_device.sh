@@ -261,176 +261,69 @@ android_guest_link_state() {
   fi
 }
 
-# Wait up to N seconds for guest eth0 to read up; fails if it never does.
-android_wait_for_guest_eth0_up() {
-  local serial="$1" until_at=$((SECONDS + $2))
-  while [[ "$(android_guest_link_state "$serial")" != up ]]; do
-    (( SECONDS < until_at )) || return 1
-    sleep 1
-  done
-}
-
-# A global setting of the guest, CR stripped; empty when it cannot be read.
-android_guest_setting() {
-  android_run_until $((SECONDS + 5)) adb -s "$1" shell settings get global "$2" 2>/dev/null |
-    tr -d '\r' | head -n 1 || true
-}
-
-# Keep the guest's cellular data network requested while Wi-Fi is the default
-# network: mobile_data_always_on (Developer options, "Mobile data always
-# active"), 1 by default in AOSP. With it off, connectivity no longer asks for
-# cellular once Wi-Fi validates, and telephony tears the data call (and with it
-# eth0) down. Logs the value and sets anything but 1 to 1; returns 0 when it
-# set it.
-android_keep_guest_mobile_data_requested() {
-  local serial="$1" value
-  value=$(android_guest_setting "$serial" mobile_data_always_on)
-  if [[ "$value" == 1 ]]; then
-    printf 'mobile_data_always_on=1\n'
-    return 1
-  fi
-  android_run_until $((SECONDS + 5)) adb -s "$serial" shell settings put global mobile_data_always_on 1 2>&1 || true
-  printf 'mobile_data_always_on=%s, set to %s\n' "${value:-unreadable}" \
-    "$(android_guest_setting "$serial" mobile_data_always_on)"
-  return 0
-}
-
 # The emulator's port redirect delivers into guest eth0, the user-mode network
 # NIC, and the goldfish radio brings eth0 up only while a cellular data call is
 # active (setupDataCall sets it up, deactivateDataCall down). On some boots no
 # data call comes up: the redirect then accepts each connect on the host and
 # nothing in the guest answers, so `adb connect` sits offline for the whole
 # budget while the emulator pipe works. Wi-Fi (wlan0) is a separate network the
-# redirect does not reach. Before dialling: mobile_data_always_on is checked
-# (and set to 1), then an eth0 that is not up has the radio's state logged and
-# telephony's data setup restarted, then gets 30 s (a late call has been seen at
-# about 25 s). With mobile data already on, `svc data enable` changes no
-# setting and so starts no re-evaluation of telephony's unsatisfied network
-# requests, so data that is on goes off for a second first. A healthy
-# boot costs two reads; an eth0 whose state cannot be read is left alone. It
-# never fails: a link still down ends on the emulator pipe as before. Writes its
+# redirect does not reach. Before dialling, eth0 is read once; one that is down
+# has the radio's state logged, so the transport log says why telephony set up
+# no data call. Nothing is changed in the guest and nothing is waited for: the
+# dial follows as before, and a data call that comes up late still gets TCP. An
+# eth0 whose state cannot be read is left alone. It never fails. Writes its
 # outcome to stdout (the transport log).
-android_bring_up_guest_data_link() {
-  local serial="$1" state started=$SECONDS always_on_set=0
-  android_keep_guest_mobile_data_requested "$serial" && always_on_set=1
+android_check_guest_data_link() {
+  local serial="$1" state
   state=$(android_guest_link_state "$serial")
-  if [[ "$state" == up || "$state" == unknown ]]; then
-    printf 'eth0 %s\n' "$state"
-    return 0
-  fi
-  printf '== eth0 %s; no data call (%s)\n' "$state" "$(date -u +%H:%M:%S)"
-  printf -- '-- guest radio state with eth0 down, before the data reset\n'
+  printf 'eth0 %s\n' "$state"
+  [[ "$state" == down ]] || return 0
+  printf '== eth0 down; no data call (%s)\n' "$(date -u +%H:%M:%S)"
+  printf -- '-- guest radio state with eth0 down\n'
   capture_android_radio_state "$serial"
-  if (( always_on_set )) && android_wait_for_guest_eth0_up "$serial" 15; then
-    printf 'eth0 up after mobile_data_always_on=1 (+%ss)\n' $((SECONDS - started))
-    return 0
-  fi
-  if [[ "$(android_guest_setting "$serial" mobile_data)" == 1 ]]; then
-    android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data disable 2>&1 || true
-    sleep 1
-  fi
-  android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data enable 2>&1 || true
-  if android_wait_for_guest_eth0_up "$serial" 30; then
-    printf 'eth0 up after data reset (+%ss)\n' $((SECONDS - started))
-  else
-    printf 'eth0 still down after data reset (%s, +%ss)\n' "$(android_guest_link_state "$serial")" \
-      $((SECONDS - started))
-  fi
   return 0
 }
 
-# A test knob's value: 1 returns 0 (on); unset or 0 returns 1 (off); anything
-# else is named in a warning (the second argument says what is left as it is)
-# and counts as off.
-android_test_knob_on() {
-  local name="$1" left="$2" value
-  value="${!name:-0}"
-  [[ "$value" != 0 ]] || return 1
-  [[ "$value" == 1 ]] && return 0
-  printf '::warning::invalid %s (%s; 1 or 0); %s\n' "$name" "$value" "$left"
-  return 1
-}
-
-# The guest's interface line for eth0 or wlan0 from `ip -o link`, for the log.
-android_guest_link_line() {
-  android_run_until $((SECONDS + 5)) adb -s "$1" shell ip -o link 2>/dev/null | tr -d '\r' |
-    awk -v name="$2" '$2 == name ":" || index($2, name "@") == 1 { print substr($0, 1, 200); exit }' || true
-}
-
-# Test-only: with ANDROID_ADB_TCP_TEST_DISABLE_DATA=1, turn the guest's mobile
-# data off right before the first switch and wait (up to 15 s) for eth0 to go
-# down, so a run exercises android_bring_up_guest_data_link on every job. Off
-# by default; any value other than 1 or 0 is named in a warning and ignored.
-android_disable_guest_data_for_test() {
-  local serial="$1" log="${2:-/dev/null}" until_at
-  android_test_knob_on ANDROID_ADB_TCP_TEST_DISABLE_DATA 'mobile data left as it is' || return 0
-  until_at=$((SECONDS + 15))
-  {
-    printf '== ANDROID_ADB_TCP_TEST_DISABLE_DATA=1: svc data disable (%s)\n' "$(date -u +%H:%M:%S)"
-    android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data disable 2>&1 || true
-    while [[ "$(android_guest_link_state "$serial")" == up ]] && (( SECONDS < until_at )); do
-      sleep 1
-    done
-    printf 'mobile_data=%s, eth0 %s after data disable: %s\n' \
-      "$(android_guest_setting "$serial" mobile_data)" "$(android_guest_link_state "$serial")" \
-      "$(android_guest_link_line "$serial" eth0)"
-  } >>"$log" 2>&1
-  return 0
-}
-
-# Test-only: with ANDROID_ADB_TCP_TEST_DROP_DATA=1, set mobile_data_always_on
-# to 0 before the first switch and wait (up to 60 s: connectivity lingers 30 s
-# before it lets a network go) for Wi-Fi to be up and eth0 down, the state the
-# switch finds on a boot with no data call, which the switch then sets back.
-# Off by default; any value other than 1 or 0 is named in a warning and ignored.
-android_drop_guest_data_for_test() {
-  local serial="$1" log="${2:-/dev/null}" started=$SECONDS before
-  android_test_knob_on ANDROID_ADB_TCP_TEST_DROP_DATA 'mobile_data_always_on left as it is' || return 0
-  {
-    printf '== ANDROID_ADB_TCP_TEST_DROP_DATA=1: mobile_data_always_on 0 (%s)\n' "$(date -u +%H:%M:%S)"
-    before=$(android_guest_setting "$serial" mobile_data_always_on)
-    android_run_until $((SECONDS + 5)) adb -s "$serial" shell settings put global mobile_data_always_on 0 2>&1 || true
-    printf 'mobile_data_always_on=%s, set to %s\n' "${before:-unreadable}" \
-      "$(android_guest_setting "$serial" mobile_data_always_on)"
-    while [[ "$(android_guest_link_state "$serial")" != down ||
-             "$(android_guest_link_state "$serial" wlan0)" != up ]] && (( SECONDS - started < 60 )); do
-      sleep 1
-    done
-    printf 'after %ss: %s / %s\n' $((SECONDS - started)) "$(android_guest_link_line "$serial" eth0)" \
-      "$(android_guest_link_line "$serial" wlan0)"
-  } >>"$log" 2>&1
-  return 0
-}
-
-# What the guest's telephony says about data: the mobile data, always-on and
-# airplane mode settings, the modem's registration, telephony's data and service
-# state, and from the radio log the network requests telephony was asked for and
-# its data setup: evaluations and the reasons data is not allowed, setup and
-# teardown calls to the modem and their results, and retries. Every query is
-# time-boxed and none can fail the switch.
+# What the guest's telephony says about data: the mobile data, always-on,
+# default data subscription and airplane mode settings, the modem's
+# registration, telephony's data and service state, the subscriptions and which
+# one is the default for data, and from the radio log: the network requests
+# telephony was asked for, each with whether it was passed on to data setup
+# (shouldApply, applied), PhoneSwitcher's choice of the data phone (radio and
+# main logs), and data setup: requests added, evaluations and the reasons data
+# is not allowed, setup and teardown calls to the modem and their results, and
+# retries. Every query is time-boxed and none can fail the switch.
 capture_android_radio_state() {
-  local serial="$1" radio
-  printf -- '-- settings mobile_data / mobile_data_always_on / airplane_mode_on\n'
-  android_diagnostic 5 adb -s "$serial" shell settings get global mobile_data 2>&1
-  android_diagnostic 5 adb -s "$serial" shell settings get global mobile_data_always_on 2>&1
-  android_diagnostic 5 adb -s "$serial" shell settings get global airplane_mode_on 2>&1
+  local serial="$1" radio main setting
+  printf -- '-- settings mobile_data / mobile_data_always_on / multi_sim_data_call / airplane_mode_on\n'
+  for setting in mobile_data mobile_data_always_on multi_sim_data_call airplane_mode_on; do
+    android_diagnostic 5 adb -s "$serial" shell settings get global "$setting" 2>&1
+  done
   printf -- '-- emu gsm status\n'
   android_diagnostic 10 adb -s "$serial" emu gsm status 2>&1
   printf -- '-- dumpsys telephony.registry (data and service state)\n'
   android_diagnostic 15 adb -s "$serial" shell dumpsys telephony.registry 2>&1 |
     awk '/mDataConnectionState|mServiceState/ && n < 8 { print substr($0, 1, 600); n++ }'
+  printf -- '-- dumpsys isub (subscriptions and the default data subscription)\n'
+  android_diagnostic 15 adb -s "$serial" shell dumpsys isub 2>&1 |
+    awk 'NR <= 40 && /[Mm]odem count|[Ss]ubId=|Loaded=|mSimState|[Ee]rror|[Ee]xception|not found|[Cc]an.t find|gave up/ { print substr($0, 1, 300) }'
   radio=$(android_diagnostic 15 adb -s "$serial" logcat -d -b radio 2>&1)
+  main=$(android_diagnostic 15 adb -s "$serial" logcat -d -b main 2>&1)
+  # Whole lines: the shouldApply or applied verdict ends each one.
   printf -- '-- logcat radio (network requests, last 15)\n'
-  awk '/TelephonyNetworkFactory/ { print substr($0, 1, 300) }' <<<"$radio" | tail -n 15
+  awk '/TelephonyNetworkFactory/' <<<"$radio" | tail -n 15
+  printf -- '-- logcat radio and main (PhoneSwitcher, last 30 each)\n'
+  awk '/PhoneSwitcher/ { print substr($0, 1, 600) }' <<<"$radio" | tail -n 30
+  awk '/PhoneSwitcher/ { print substr($0, 1, 600) }' <<<"$main" | tail -n 30
   printf -- '-- logcat radio (data setup, last 60)\n'
-  awk '!/TelephonyNetworkFactory/ && (/SETUP_DATA_CALL|DEACTIVATE_DATA_CALL|DATA_CALL_LIST|[Dd]ata evaluation|[Dd]isallowed|[Nn]ot allowed|[Rr]eject|[Rr]etry|[Tt]ear ?[Dd]own|onSetupDataNetwork|SetupDataFailed|Re-evaluating|[Uu]nwanted|setupDataCall|deactivate|DataNetwork|DRM-/) { print substr($0, 1, 400) }' <<<"$radio" |
+  awk '!/TelephonyNetworkFactory|PhoneSwitcher/ && (/SETUP_DATA_CALL|DEACTIVATE_DATA_CALL|DATA_CALL_LIST|[Dd]ata evaluation|[Dd]isallowed|[Nn]ot allowed|[Rr]eject|[Rr]etry|[Tt]ear ?[Dd]own|onSetupDataNetwork|SetupDataFailed|Re-evaluating|[Uu]nwanted|setupDataCall|deactivate|DataNetwork|DRM-|NetworkRequest:|Creating data network/) { print substr($0, 1, 400) }' <<<"$radio" |
     tail -n 60
   return 0
 }
 
 # What the guest's network and telephony say when the switch ends on the
 # emulator pipe: the links and addresses (is eth0 up, has it 10.0.2.15), then
-# the radio state above, now after any data reset.
+# the radio state above.
 capture_android_data_link_evidence() {
   local serial="$1"
   printf -- '-- ip -o link\n'
@@ -486,19 +379,13 @@ use_android_adb_over_tcp() {
     return 0
   fi
   tcp_serial="127.0.0.1:$host_port"
-  # The test knobs act on the first switch that runs, once per job.
-  if [[ -z "${ANDROID_GUEST_DATA_TEST_KNOBS_DONE:-}" ]]; then
-    ANDROID_GUEST_DATA_TEST_KNOBS_DONE=1
-    android_disable_guest_data_for_test "$emulator_serial" "$log"
-    android_drop_guest_data_for_test "$emulator_serial" "$log"
-  fi
   {
     printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
     # A reboot ends adbd's TCP listener, so a connection kept from before it
     # would only sit offline.
     android_run_until $((SECONDS + 10)) adb disconnect "$tcp_serial" 2>&1 || true
-    # Outside the budget, which is for dials that can be answered.
-    android_bring_up_guest_data_link "$emulator_serial"
+    # Outside the budget, which is for the dials.
+    android_check_guest_data_link "$emulator_serial"
   } >>"$log" 2>&1
   # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
   # so one pass that starts just before it can end about 30 s past the budget
