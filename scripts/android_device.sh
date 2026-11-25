@@ -237,6 +237,119 @@ android_boot_id() {
     tr -d '\r' || true
 }
 
+# The state of guest eth0, asked through the emulator serial: the kernel's
+# operstate (up, down, ...), else up or down from `ip -o link`'s flags, else
+# unknown when neither answers.
+android_guest_eth0_state() {
+  local serial="$1" state link flags flags_re='<([^>]*)>'
+  state=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell cat /sys/class/net/eth0/operstate 2>/dev/null |
+    tr -d '\r' | head -n 1 || true)
+  case "$state" in
+    up|down|dormant|lowerlayerdown|notpresent|testing) printf '%s\n' "$state"; return 0 ;;
+  esac
+  link=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell ip -o link show eth0 2>/dev/null |
+    tr -d '\r' || true)
+  if [[ "$link" =~ $flags_re ]]; then
+    flags=",${BASH_REMATCH[1]},"
+    if [[ "$flags" == *,UP,* && "$flags" == *,LOWER_UP,* ]]; then
+      printf '%s\n' up
+    else
+      printf '%s\n' down
+    fi
+  else
+    printf '%s\n' unknown
+  fi
+}
+
+# Wait up to N seconds for guest eth0 to read up; fails if it never does.
+android_wait_for_guest_eth0_up() {
+  local serial="$1" until_at=$((SECONDS + $2))
+  while [[ "$(android_guest_eth0_state "$serial")" != up ]]; do
+    (( SECONDS < until_at )) || return 1
+    sleep 1
+  done
+}
+
+# The emulator's port redirect delivers into guest eth0, the user-mode network
+# NIC, and the goldfish radio brings eth0 up only while a cellular data call is
+# active (setupDataCall sets it up, deactivateDataCall down). On some boots no
+# data call comes up: the redirect then accepts each connect on the host and
+# nothing in the guest answers, so `adb connect` sits offline for the whole
+# budget while the emulator pipe works. Wi-Fi (wlan0) is a separate network the
+# redirect does not reach, so it is not looked at. Before dialling, an eth0 that
+# is not up gets the data call asked for (`svc data enable`), then, if it is
+# still down after 10 s, an airplane-mode toggle, which restarts telephony's
+# data setup, and 20 s more. A healthy boot costs one read; an eth0 whose state
+# cannot be read is left alone. It never fails: a link still down ends on the
+# emulator pipe as before. Writes its outcome to stdout (the transport log).
+android_bring_up_guest_data_link() {
+  local serial="$1" state
+  state=$(android_guest_eth0_state "$serial")
+  if [[ "$state" == up || "$state" == unknown ]]; then
+    printf 'eth0 %s\n' "$state"
+    return 0
+  fi
+  printf '== eth0 %s; no data call (%s)\n' "$state" "$(date -u +%H:%M:%S)"
+  android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data enable 2>&1 || true
+  if android_wait_for_guest_eth0_up "$serial" 10; then
+    printf 'eth0 up after data enable\n'
+    return 0
+  fi
+  android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode enable 2>&1 || true
+  sleep 2
+  android_run_until $((SECONDS + 10)) adb -s "$serial" shell cmd connectivity airplane-mode disable 2>&1 || true
+  if android_wait_for_guest_eth0_up "$serial" 20; then
+    printf 'eth0 up after airplane toggle\n'
+  else
+    printf 'eth0 still down (%s)\n' "$(android_guest_eth0_state "$serial")"
+  fi
+  return 0
+}
+
+# Test-only: with ANDROID_ADB_TCP_TEST_DISABLE_DATA=1, turn the guest's mobile
+# data off right before the first switch and wait (up to 15 s) for eth0 to go
+# down, so a run exercises android_bring_up_guest_data_link on every job. Off
+# by default; any value other than 1 or 0 is named in a warning and ignored.
+android_disable_guest_data_for_test() {
+  local serial="$1" log="${2:-/dev/null}" value="${ANDROID_ADB_TCP_TEST_DISABLE_DATA:-0}" until_at
+  [[ "$value" != 0 ]] || return 0
+  if [[ "$value" != 1 ]]; then
+    printf '::warning::invalid ANDROID_ADB_TCP_TEST_DISABLE_DATA (%s; 1 or 0); mobile data left as it is\n' "$value"
+    return 0
+  fi
+  until_at=$((SECONDS + 15))
+  {
+    printf '== ANDROID_ADB_TCP_TEST_DISABLE_DATA=1: svc data disable (%s)\n' "$(date -u +%H:%M:%S)"
+    android_run_until $((SECONDS + 10)) adb -s "$serial" shell svc data disable 2>&1 || true
+    while [[ "$(android_guest_eth0_state "$serial")" == up ]] && (( SECONDS < until_at )); do
+      sleep 1
+    done
+    printf 'eth0 %s after data disable\n' "$(android_guest_eth0_state "$serial")"
+  } >>"$log" 2>&1
+  return 0
+}
+
+# What the guest's network and telephony say when the switch ends on the
+# emulator pipe: the links and addresses (is eth0 up, has it 10.0.2.15), the
+# modem's registration, telephony's data state, and the radio log's data-call
+# setup and teardown. Every query is time-boxed and none can fail the switch.
+capture_android_data_link_evidence() {
+  local serial="$1"
+  printf -- '-- ip -o link\n'
+  android_diagnostic 10 adb -s "$serial" shell ip -o link 2>&1
+  printf -- '-- ip -4 -o addr\n'
+  android_diagnostic 10 adb -s "$serial" shell ip -4 -o addr 2>&1
+  printf -- '-- emu gsm status\n'
+  android_diagnostic 10 adb -s "$serial" emu gsm status 2>&1
+  printf -- '-- dumpsys telephony.registry (data and service state)\n'
+  android_diagnostic 15 adb -s "$serial" shell dumpsys telephony.registry 2>&1 |
+    awk '/mDataConnectionState|mServiceState/ && n < 8 { print substr($0, 1, 600); n++ }'
+  printf -- '-- logcat radio (data calls, last 40)\n'
+  android_diagnostic 15 adb -s "$serial" logcat -d -b radio 2>&1 |
+    awk '/setupDataCall|DataNetwork|deactivate|RetryManager/' | tail -n 40
+  return 0
+}
+
 # Move ADB off the emulator's adb pipe and onto adbd's own TCP listener, which
 # the emulator redirects from a host port. On hosted runners the pipe's bridge
 # closes the host and guest ends together during load bursts (the host server
@@ -283,17 +396,19 @@ use_android_adb_over_tcp() {
     return 0
   fi
   tcp_serial="127.0.0.1:$host_port"
+  {
+    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
+    # A reboot ends adbd's TCP listener, so a connection kept from before it
+    # would only sit offline.
+    android_run_until $((SECONDS + 10)) adb disconnect "$tcp_serial" 2>&1 || true
+    # Outside the budget, which is for dials that can be answered.
+    android_bring_up_guest_data_link "$emulator_serial"
+  } >>"$log" 2>&1
   # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
   # so one pass that starts just before it can end about 30 s past the budget
   # at worst.
   started=$SECONDS
   deadline=$((SECONDS + timeout_seconds))
-  {
-    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
-    # A reboot ends adbd's TCP listener, so a connection kept from before it
-    # would only sit offline.
-    android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
-  } >>"$log" 2>&1
   while true; do
     pass=$((pass + 1))
     {
@@ -371,7 +486,11 @@ use_android_adb_over_tcp() {
       fi
     fi
     if (( SECONDS >= deadline )); then
-      android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      {
+        android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" 2>&1 || true
+        printf -- '-- guest data link at fallback (%s)\n' "$(date -u +%H:%M:%S)"
+        capture_android_data_link_evidence "$emulator_serial"
+      } >>"$log" 2>&1
       ANDROID_ADB_TCP_SWITCH=timeout
       printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
         "$emulator_serial" "$tcp_serial" "$timeout_seconds"
@@ -508,7 +627,8 @@ capture_android_transport_diagnostics() {
     android_diagnostic 10 adb -s "$guest" shell ps -A -o PID,PPID,STIME,ETIME,NAME 2>&1 |
       awk '!/^ *[0-9]/ || /adbd/'
     printf -- '-- logcat adbd\n'
-    android_diagnostic 15 adb -s "$guest" logcat -d -s adbd -t 200 2>&1
+    # logcat's -t counts entries before -s filters them, so tail after it.
+    android_diagnostic 15 adb -s "$guest" logcat -d -s adbd 2>&1 | tail -n 200
     printf -- '-- logcat crash buffer\n'
     android_diagnostic 15 adb -s "$guest" logcat -d -b crash -t 80 2>&1
   } >>"$out" 2>&1
