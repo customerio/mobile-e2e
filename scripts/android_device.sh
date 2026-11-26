@@ -237,6 +237,134 @@ android_boot_id() {
     tr -d '\r' || true
 }
 
+# The state of a guest network interface (eth0 unless named), from one
+# `ip -o link` dump through the emulator serial: up when its flags carry UP and
+# LOWER_UP and its state is not DOWN, down otherwise, and unknown when the dump
+# has no line for it. On CI's API 35 image the per-interface reads (sysfs
+# operstate, `ip -o link show eth0`) gave nothing usable while the dump worked
+# in the same job, so only the dump is read. An unknown result logs what the
+# dump returned, on stderr.
+android_guest_link_state() {
+  local serial="$1" iface="${2:-eth0}" dump line flags flags_re='<([^>]*)>' down_re=' state DOWN( |$)'
+  dump=$(android_run_until $((SECONDS + 5)) adb -s "$serial" shell ip -o link 2>&1 | tr -d '\r' || true)
+  line=$(awk -v name="$iface" '$2 == name ":" || index($2, name "@") == 1 { print; exit }' <<<"$dump")
+  if ! [[ "$line" =~ $flags_re ]]; then
+    printf '%s unreadable from ip -o link: %s\n' "$iface" "$(head -n 3 <<<"$dump" | cut -c 1-200 | paste -sd '|' -)" >&2
+    printf '%s\n' unknown
+    return 0
+  fi
+  flags=",${BASH_REMATCH[1]},"
+  if [[ "$flags" == *,UP,* && "$flags" == *,LOWER_UP,* && ! "$line" =~ $down_re ]]; then
+    printf '%s\n' up
+  else
+    printf '%s\n' down
+  fi
+}
+
+# The fallback capture below has one deadline for all its queries, so a slow
+# adb cannot stretch it: each query gets the smaller of its own limit and the
+# time left (android_run_until's 2 s floor can take the last one a few seconds
+# past it). Once the deadline has passed, or after the first query that is cut
+# off (adb is then not answering), the queries left are skipped and named in
+# one line.
+ANDROID_DATA_LINK_CAPTURE_SECONDS=30
+
+# One query of that capture: a name for the log, its own limit in seconds, then
+# the command. Leaves the command's output (stdout and stderr) in
+# android_capture_output and returns 0, or returns 1 when the query is skipped.
+android_capture_query() {
+  local name="$1" seconds="$2" left status=0
+  shift 2
+  android_capture_output=""
+  left=$((android_capture_deadline - SECONDS))
+  if [[ -z "$android_capture_stop" ]] && (( left <= 0 )); then
+    android_capture_stop='capture deadline reached'
+  fi
+  if [[ -n "$android_capture_stop" ]]; then
+    android_capture_skipped="${android_capture_skipped:+$android_capture_skipped, }$name"
+    return 1
+  fi
+  (( seconds <= left )) || seconds=$left
+  android_capture_output=$(android_run_until $((SECONDS + seconds)) "$@" 2>&1) ||
+    status=$?
+  if (( status == 124 )); then
+    [[ -z "$android_capture_output" ]] || android_capture_output+=$'\n'
+    android_capture_output+="(gave up after ${seconds}s)"
+    android_capture_stop="$name timed out after ${seconds}s, capture stopped"
+  fi
+  return 0
+}
+
+# What the guest's network and telephony say when the switch ends on the
+# emulator pipe, all within ANDROID_DATA_LINK_CAPTURE_SECONDS: the links and
+# addresses (is eth0 up, has it 10.0.2.15); the mobile data, always-on,
+# multi-SIM data and airplane mode settings; the modem's registration;
+# telephony's data and service state; the slot-to-subscription mapping and the
+# default data subscription (isub, ICCIDs redacted); and from the radio log:
+# the network requests telephony was asked for, each with whether it was passed
+# on to data setup (shouldApply, applied), PhoneSwitcher's choice of the data
+# phone (radio and main logs), and data setup: requests added, evaluations and
+# the reasons data is not allowed, setup and teardown calls to the modem and
+# their results, and retries. None of it can fail the switch.
+capture_android_data_link_evidence() {
+  local serial="$1" setting radio="" main=""
+  android_capture_deadline=$((SECONDS + ANDROID_DATA_LINK_CAPTURE_SECONDS))
+  android_capture_stop=""
+  android_capture_skipped=""
+  if android_capture_query 'ip -o link' 10 adb -s "$serial" shell ip -o link; then
+    printf -- '-- ip -o link\n%s\n' "$android_capture_output"
+  fi
+  if android_capture_query 'ip -4 -o addr' 10 adb -s "$serial" shell ip -4 -o addr; then
+    printf -- '-- ip -4 -o addr\n%s\n' "$android_capture_output"
+  fi
+  for setting in mobile_data mobile_data_always_on multi_sim_data_call airplane_mode_on; do
+    android_capture_query "settings $setting" 5 \
+      adb -s "$serial" shell settings get global "$setting" || continue
+    [[ "$setting" != mobile_data ]] ||
+      printf -- '-- settings mobile_data / mobile_data_always_on / multi_sim_data_call / airplane_mode_on\n'
+    printf '%s\n' "$android_capture_output"
+  done
+  if android_capture_query 'emu gsm status' 10 adb -s "$serial" emu gsm status; then
+    printf -- '-- emu gsm status\n%s\n' "$android_capture_output"
+  fi
+  if android_capture_query 'dumpsys telephony.registry' 15 \
+       adb -s "$serial" shell dumpsys telephony.registry; then
+    printf -- '-- dumpsys telephony.registry (data and service state)\n'
+    awk '/mDataConnectionState|mServiceState/ && n < 8 { print substr($0, 1, 600); n++ }' \
+      <<<"$android_capture_output"
+  fi
+  if android_capture_query 'dumpsys isub' 15 adb -s "$serial" shell dumpsys isub; then
+    printf -- '-- dumpsys isub (slot-to-subscription mapping and default data subscription, ICCIDs redacted)\n'
+    awk 'NR <= 40 && /[Mm]odem count|[Ss]ubId=|Loaded=|mSimState|[Ee]rror|[Ee]xception|not found|[Cc]an.t find|gave up/ {
+      gsub(/[Ii][Cc][Cc][Ii][Dd]=[*0-9A-Za-z]*/, "iccId=<redacted>")
+      gsub(/[Cc]ard[Ss]tring=[*0-9A-Za-z]*/, "cardString=<redacted>")
+      print substr($0, 1, 300)
+    }' <<<"$android_capture_output"
+  fi
+  if android_capture_query 'logcat radio' 15 adb -s "$serial" logcat -d -b radio; then
+    radio=$android_capture_output
+  fi
+  if android_capture_query 'logcat main' 15 adb -s "$serial" logcat -d -b main; then
+    main=$android_capture_output
+  fi
+  if [[ -n "$radio$main" ]]; then
+    # Whole lines: the shouldApply or applied verdict ends each one.
+    printf -- '-- logcat radio (network requests, last 15)\n'
+    awk '/TelephonyNetworkFactory/' <<<"$radio" | tail -n 15
+    printf -- '-- logcat radio and main (PhoneSwitcher, last 30 each)\n'
+    awk '/PhoneSwitcher/ { print substr($0, 1, 600) }' <<<"$radio" | tail -n 30
+    awk '/PhoneSwitcher/ { print substr($0, 1, 600) }' <<<"$main" | tail -n 30
+    printf -- '-- logcat radio (data setup, last 60)\n'
+    awk '!/TelephonyNetworkFactory|PhoneSwitcher/ && (/SETUP_DATA_CALL|DEACTIVATE_DATA_CALL|DATA_CALL_LIST|[Dd]ata evaluation|[Dd]isallowed|[Nn]ot allowed|[Rr]eject|[Rr]etry|[Tt]ear ?[Dd]own|onSetupDataNetwork|SetupDataFailed|Re-evaluating|[Uu]nwanted|setupDataCall|deactivate|DataNetwork|DRM-|NetworkRequest:|Creating data network/) { print substr($0, 1, 400) }' <<<"$radio" |
+      tail -n 60
+  fi
+  if [[ -n "$android_capture_stop" ]]; then
+    printf -- '-- %s; skipped: %s\n' "$android_capture_stop" \
+      "${android_capture_skipped:-nothing}"
+  fi
+  return 0
+}
+
 # Move ADB off the emulator's adb pipe and onto adbd's own TCP listener, which
 # the emulator redirects from a host port. On hosted runners the pipe's bridge
 # closes the host and guest ends together during load bursts (the host server
@@ -283,17 +411,25 @@ use_android_adb_over_tcp() {
     return 0
   fi
   tcp_serial="127.0.0.1:$host_port"
+  {
+    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
+    # A reboot ends adbd's TCP listener, so a connection kept from before it
+    # would only sit offline.
+    android_run_until $((SECONDS + 10)) adb disconnect "$tcp_serial" 2>&1 || true
+    # Outside the budget, which is for the dials. The emulator's port redirect
+    # delivers into guest eth0 (Wi-Fi, wlan0, is a network it does not reach),
+    # and the goldfish radio brings eth0 up only while a cellular data call is
+    # active. On some boots none comes up, and `adb connect` then sits offline
+    # while the pipe works. eth0 is read once and logged, and nothing waits for
+    # it: a healthy boot's data call is often only late. The capture at the
+    # pipe fallback is what explains a bad boot.
+    printf 'eth0 %s\n' "$(android_guest_link_state "$emulator_serial")"
+  } >>"$log" 2>&1
   # Every adb call is cut off at the deadline, but each still gets a 2 s floor,
   # so one pass that starts just before it can end about 30 s past the budget
   # at worst.
   started=$SECONDS
   deadline=$((SECONDS + timeout_seconds))
-  {
-    printf '== switching %s to %s (%s)\n' "$emulator_serial" "$tcp_serial" "$(date -u +%H:%M:%S)"
-    # A reboot ends adbd's TCP listener, so a connection kept from before it
-    # would only sit offline.
-    android_run_until "$deadline" adb disconnect "$tcp_serial" 2>&1 || true
-  } >>"$log" 2>&1
   while true; do
     pass=$((pass + 1))
     {
@@ -371,7 +507,11 @@ use_android_adb_over_tcp() {
       fi
     fi
     if (( SECONDS >= deadline )); then
-      android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" >>"$log" 2>&1 || true
+      {
+        android_run_until $((SECONDS + 5)) adb disconnect "$tcp_serial" 2>&1 || true
+        printf -- '-- guest data link at fallback (%s)\n' "$(date -u +%H:%M:%S)"
+        capture_android_data_link_evidence "$emulator_serial"
+      } >>"$log" 2>&1
       ANDROID_ADB_TCP_SWITCH=timeout
       printf '::warning::adb transport: emulator pipe (%s); adbd did not answer on %s within %ss\n' \
         "$emulator_serial" "$tcp_serial" "$timeout_seconds"
@@ -508,7 +648,8 @@ capture_android_transport_diagnostics() {
     android_diagnostic 10 adb -s "$guest" shell ps -A -o PID,PPID,STIME,ETIME,NAME 2>&1 |
       awk '!/^ *[0-9]/ || /adbd/'
     printf -- '-- logcat adbd\n'
-    android_diagnostic 15 adb -s "$guest" logcat -d -s adbd -t 200 2>&1
+    # logcat's -t counts entries before -s filters them, so tail after it.
+    android_diagnostic 15 adb -s "$guest" logcat -d -s adbd 2>&1 | tail -n 200
     printf -- '-- logcat crash buffer\n'
     android_diagnostic 15 adb -s "$guest" logcat -d -b crash -t 80 2>&1
   } >>"$out" 2>&1
