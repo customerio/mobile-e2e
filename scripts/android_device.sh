@@ -336,8 +336,8 @@ capture_android_data_link_evidence() {
   if android_capture_query 'dumpsys isub' 15 adb -s "$serial" shell dumpsys isub; then
     printf -- '-- dumpsys isub (slot-to-subscription mapping and default data subscription, ICCIDs redacted)\n'
     awk 'NR <= 40 && /[Mm]odem count|[Ss]ubId=|Loaded=|mSimState|[Ee]rror|[Ee]xception|not found|[Cc]an.t find|gave up/ {
-      gsub(/[Ii][Cc][Cc][Ii][Dd]=[^] ,}]*/, "iccId=<redacted>")
-      gsub(/[Cc]ard[Ss]tring=[^] ,}]*/, "cardString=<redacted>")
+      gsub(/[Ii][Cc][Cc][Ii][Dd]=[0-9A-Za-z]*/, "iccId=<redacted>")
+      gsub(/[Cc]ard[Ss]tring=[0-9A-Za-z]*/, "cardString=<redacted>")
       print substr($0, 1, 300)
     }' <<<"$android_capture_output"
   fi
