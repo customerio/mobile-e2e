@@ -105,6 +105,15 @@ name: E2E — Campaign 141 full loop with real push delivery
 - tapOn:
     text: "^Allow$"
     optional: true
+# The Android sample shows a status dialog when permission was already granted.
+# Confirm it is enabled before dismissing the overlay and returning to the form.
+- runFlow:
+    when:
+      platform: Android
+      visible: "^Push Permission$"
+    commands:
+      - assertVisible: "Push notifications are enabled on this device"
+      - tapOn: "^OK$"
 - scrollUntilVisible:
     element:
       id: "custom_event_button"
